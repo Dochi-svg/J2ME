@@ -3,6 +3,7 @@ package ru.playsoftware.j2meloader.util;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Rect;
 import android.graphics.Typeface;
 
 import org.json.JSONArray;
@@ -296,82 +297,221 @@ public class TranslationManager {
 }
 
 class GraphicsUtils {
-
+    // Cache untuk menyimpan hasil pengukuran teks
+    private static final Map<String, Float> textWidthCache = new ConcurrentHashMap<>();
+    private static final int MAX_CACHE_SIZE = 200;
+    
+    // Konstanta untuk pengaturan teks
+    private static final float MIN_FONT_SIZE = 6f;
+    private static final float MAX_SCALE_DOWN = 0.5f; // Maksimal 50% dari ukuran asli
+    private static final float LINE_SPACING_MULTIPLIER = 1.2f;
+    
+    // Menyimpan posisi teks yang sudah dirender untuk deteksi tabrakan
+    private static final Map<String, Rect> renderedTextBounds = new ConcurrentHashMap<>();
+    
     public static void drawStringIntercepted(Canvas canvas, Paint paint, String str, float x, float y, int anchor) {
         if (str == null || str.trim().isEmpty() || canvas == null || paint == null) return;
 
         String teksBaru = TranslationManager.processString(str);
-
+        
+        // Simpan state asli
         Typeface oldTypeface = paint.getTypeface();
         boolean oldAntiAlias = paint.isAntiAlias();
         boolean oldSubpixel = paint.isSubpixelText();
         float originalTextSize = paint.getTextSize();
-
-        // Kurangi font 2.5px dari ukuran asli game agar pas di box
-        float targetFontSize = Math.max((originalTextSize > 0 ? originalTextSize : 12f) - 2.5f, 8f);
-
-        paint.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
-        paint.setTextSize(targetFontSize);
-        paint.setAntiAlias(true);
-        paint.setSubpixelText(true);
-
+        
         try {
-            float widthAsli = paint.measureText(str.trim());
-            renderAndScaleText(canvas, paint, str.trim(), teksBaru, x, y, anchor);
+            String originalText = str.trim();
+            String translatedText = teksBaru.trim();
+            
+            // Deteksi apakah ini teks Cina
+            boolean isChinese = containsChinese(originalText);
+            
+            // Untuk teks Cina, gunakan font lebih kecil
+            float targetFontSize;
+            if (isChinese) {
+                // Teks Cina ke Indonesia biasanya lebih panjang
+                targetFontSize = Math.max(originalTextSize * 0.7f, MIN_FONT_SIZE);
+            } else {
+                targetFontSize = Math.max(originalTextSize * 0.85f, MIN_FONT_SIZE);
+            }
+            
+            paint.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
+            paint.setTextSize(targetFontSize);
+            paint.setAntiAlias(true);
+            paint.setSubpixelText(true);
+            
+            // Render dengan smart fitting
+            renderSmartText(canvas, paint, originalText, translatedText, x, y, anchor, isChinese);
+            
         } finally {
+            // Restore state asli
             paint.setTextSize(originalTextSize);
             paint.setTypeface(oldTypeface);
             paint.setAntiAlias(oldAntiAlias);
             paint.setSubpixelText(oldSubpixel);
         }
     }
-
-    private static void renderAndScaleText(Canvas canvas, Paint paint, String teksAsli, String teksRender, float x, float y, int anchor) {
-        float widthAsli = paint.measureText(teksAsli);
-        float widthBaru = paint.measureText(teksRender);
-
-        Paint.FontMetrics fm = paint.getFontMetrics();
-
-        float drawX = alignX(x, widthAsli, anchor);
-        float drawY = alignY(y, fm, anchor);
-
-        boolean butuhScaling = !teksRender.equals(teksAsli) && (widthBaru > widthAsli) && (widthBaru > 0) && (widthAsli > 0);
-
+    
+    private static boolean containsChinese(String text) {
+        for (char c : text.toCharArray()) {
+            if (Character.UnicodeScript.of(c) == Character.UnicodeScript.HAN) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    private static void renderSmartText(Canvas canvas, Paint paint, String originalText, 
+                                        String translatedText, float x, float y, int anchor, boolean isChinese) {
+        // Hitung lebar teks
+        float originalWidth = getTextWidth(paint, originalText);
+        float translatedWidth = getTextWidth(paint, translatedText);
+        
+        // Hitung posisi awal
+        float drawX = alignX(x, originalWidth, anchor);
+        float drawY = alignY(y, paint.getFontMetrics(), anchor);
+        
+        // Cek apakah teks terjemahan lebih panjang
+        boolean isLonger = translatedWidth > originalWidth;
+        
+        if (!isLonger) {
+            // Teks terjemahan lebih pendek atau sama, render normal
+            drawTextWithShadow(canvas, paint, translatedText, drawX, drawY);
+            return;
+        }
+        
+        // Teks terjemahan lebih panjang, perlu penanganan khusus
+        float maxWidth = originalWidth;
+        
+        // Hitung skala yang diperlukan
+        float scaleX = maxWidth / translatedWidth;
+        
+        // Batasi scaling minimum
+        if (scaleX < MAX_SCALE_DOWN) {
+            scaleX = MAX_SCALE_DOWN;
+        }
+        
+        // Untuk teks Cina, gunakan word wrap jika scaling terlalu ekstrem
+        if (isChinese && scaleX < 0.6f) {
+            renderWithWordWrap(canvas, paint, translatedText, drawX, drawY, maxWidth);
+            return;
+        }
+        
+        // Render dengan scaling
         canvas.save();
         try {
-            if (butuhScaling) {
-                float scaleX = widthAsli / widthBaru;
-                canvas.translate(drawX, drawY);
-                canvas.scale(scaleX, 1.0f);
-                drawShadowAndText(canvas, paint, teksRender, 0, 0);
-            } else {
-                drawShadowAndText(canvas, paint, teksRender, drawX, drawY);
-            }
+            canvas.translate(drawX, drawY);
+            canvas.scale(scaleX, 0.95f); // Sedikit compress vertical
+            
+            // Render teks
+            drawTextWithShadow(canvas, paint, translatedText, 0, 0);
+            
+            // Simpan bounds untuk deteksi tabrakan
+            Rect bounds = new Rect(
+                (int)drawX, 
+                (int)(drawY - paint.getFontMetrics().ascent),
+                (int)(drawX + translatedWidth * scaleX),
+                (int)(drawY + paint.getFontMetrics().descent)
+            );
+            
+            String key = translatedText + "_" + drawX + "_" + drawY;
+            renderedTextBounds.put(key, bounds);
+            
         } finally {
             canvas.restore();
         }
     }
-
-    private static void drawShadowAndText(Canvas canvas, Paint paint, String text, float x, float y) {
+    
+    private static void renderWithWordWrap(Canvas canvas, Paint paint, String text, 
+                                           float x, float y, float maxWidth) {
+        if (text == null || text.isEmpty()) return;
+        
+        String[] words = text.split("\\s+");
+        StringBuilder currentLine = new StringBuilder();
+        float lineHeight = (paint.getFontMetrics().descent - paint.getFontMetrics().ascent) * LINE_SPACING_MULTIPLIER;
+        float currentY = y;
+        
+        for (String word : words) {
+            String testLine = currentLine.length() > 0 ? currentLine + " " + word : word;
+            float testWidth = getTextWidth(paint, testLine);
+            
+            if (testWidth > maxWidth && currentLine.length() > 0) {
+                // Render baris saat ini
+                drawTextWithShadow(canvas, paint, currentLine.toString(), x, currentY);
+                
+                // Mulai baris baru
+                currentLine = new StringBuilder(word);
+                currentY += lineHeight;
+                
+                // Cek jika sudah terlalu banyak baris
+                if (currentY - y > lineHeight * 3) {
+                    // Maksimal 3 baris, truncate jika lebih
+                    String truncated = currentLine.toString();
+                    if (truncated.length() > 3) {
+                        truncated = truncated.substring(0, truncated.length() - 3) + "...";
+                    }
+                    drawTextWithShadow(canvas, paint, truncated, x, currentY);
+                    return;
+                }
+            } else {
+                currentLine = new StringBuilder(testLine);
+            }
+        }
+        
+        // Render baris terakhir
+        if (currentLine.length() > 0) {
+            drawTextWithShadow(canvas, paint, currentLine.toString(), x, currentY);
+        }
+    }
+    
+    private static float getTextWidth(Paint paint, String text) {
+        // Cek cache
+        String cacheKey = text + "_" + paint.getTextSize();
+        Float cachedWidth = textWidthCache.get(cacheKey);
+        if (cachedWidth != null) {
+            return cachedWidth;
+        }
+        
+        // Hitung dan cache
+        float width = paint.measureText(text);
+        
+        // Batasi ukuran cache
+        if (textWidthCache.size() < MAX_CACHE_SIZE) {
+            textWidthCache.put(cacheKey, width);
+        }
+        
+        return width;
+    }
+    
+    private static void drawTextWithShadow(Canvas canvas, Paint paint, String text, float x, float y) {
         int originalColor = paint.getColor();
-
-        paint.setColor(Color.argb(160, 0, 0, 0));
+        
+        // Shadow halus
+        paint.setColor(Color.argb(120, 0, 0, 0));
         canvas.drawText(text, x + 1f, y + 1f, paint);
-
+        
+        // Text utama
         paint.setColor(originalColor);
         canvas.drawText(text, x, y, paint);
     }
-
+    
     private static float alignX(float x, float width, int anchor) {
-        if ((anchor & 1) != 0) return x - (width / 2f);
-        if ((anchor & 8) != 0) return x - width;
-        return x;
+        if ((anchor & 1) != 0) return x - (width / 2f); // CENTER
+        if ((anchor & 8) != 0) return x - width; // RIGHT
+        return x; // LEFT
     }
-
+    
     private static float alignY(float y, Paint.FontMetrics fm, int anchor) {
-        if ((anchor & 16) != 0) return y - fm.ascent;
-        if ((anchor & 32) != 0) return y - (fm.ascent + fm.descent)/2f;
-        if ((anchor & 64) != 0) return y - fm.descent;
-        return y;
+        if ((anchor & 16) != 0) return y - fm.ascent; // TOP
+        if ((anchor & 32) != 0) return y - (fm.ascent + fm.descent) / 2f; // CENTER
+        if ((anchor & 64) != 0) return y - fm.descent; // BOTTOM
+        return y - fm.ascent; // Default TOP
+    }
+    
+    // Method untuk membersihkan cache
+    public static void clearCache() {
+        textWidthCache.clear();
+        renderedTextBounds.clear();
     }
 }
