@@ -27,9 +27,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-// ==========================================
-// 1. CLASS UTAMA (TranslationManager)
-// ==========================================
 public class TranslationManager {
     private static final Map<String, String> translationMap = new ConcurrentHashMap<>();
     private static final Map<String, String> reverseTranslationMap = new ConcurrentHashMap<>();
@@ -188,35 +185,6 @@ public class TranslationManager {
         }
     }
 
-    private static String wrapText(String text, int maxCharsPerLine) {
-        if (text == null || text.length() <= maxCharsPerLine || text.contains("\n")) {
-            return text;
-        }
-
-        StringBuilder sb = new StringBuilder();
-        String[] words = text.split(" ");
-        int currentLineLength = 0;
-
-        for (String word : words) {
-            if (currentLineLength + word.length() + 1 > maxCharsPerLine) {
-                if (sb.length() > 0) {
-                    sb.append("\n");
-                }
-                sb.append(word);
-                currentLineLength = word.length();
-            } else {
-                if (sb.length() > 0 && currentLineLength > 0) {
-                    sb.append(" ");
-                    currentLineLength++;
-                }
-                sb.append(word);
-                currentLineLength += word.length();
-            }
-        }
-
-        return sb.toString();
-    }
-
     public static String processString(String original) {
         if (original == null) return original;
         
@@ -230,14 +198,7 @@ public class TranslationManager {
             if (dumpedStrings.remove(trimmed) != null) {
                 hasNewDataToSave.set(true);
             }
-            
-            String translated = translationMap.get(trimmed);
-            int maxChar = Math.max(trimmed.length() + 3, 18);
-            if (translated.length() > trimmed.length()) {
-                translated = wrapText(translated, maxChar);
-            }
-
-            return original.replace(trimmed, translated);
+            return original.replace(trimmed, translationMap.get(trimmed));
         }
 
         if (reverseTranslationMap.containsKey(trimmed)) {
@@ -251,21 +212,9 @@ public class TranslationManager {
             }
         }
 
-        if (isDumpMode) {
-            dumpedStrings.keySet().removeIf(key -> trimmed.length() > key.length() && trimmed.contains(key));
-
-            boolean isSubText = false;
-            for (String key : dumpedStrings.keySet()) {
-                if (key.length() >= trimmed.length() && key.contains(trimmed)) {
-                    isSubText = true;
-                    break;
-                }
-            }
-
-            if (!isSubText && !dumpedStrings.containsKey(trimmed)) {
-                dumpedStrings.put(trimmed, trimmed);
-                hasNewDataToSave.set(true);
-            }
+        if (isDumpMode && !dumpedStrings.containsKey(trimmed)) {
+            dumpedStrings.put(trimmed, trimmed);
+            hasNewDataToSave.set(true);
         }
 
         return original;
@@ -307,7 +256,6 @@ public class TranslationManager {
                         if (!hasilTranslate.isEmpty() && !hasilTranslate.equals(teks)) {
                             translationMap.put(teks, hasilTranslate);
                             reverseTranslationMap.put(hasilTranslate, teks);
-
                             hasNewTranslationToSave.set(true);
 
                             if (dumpedStrings.remove(teks) != null) {
@@ -318,7 +266,6 @@ public class TranslationManager {
                 }
             }
         } catch (Exception e) {
-            // Error koneksi diabaikan
         } finally {
             if (conn != null) {
                 conn.disconnect();
@@ -333,81 +280,42 @@ public class TranslationManager {
     public static boolean isAutoTranslateEnabled() { return autoTranslateEnabled; }
 }
 
-// ==========================================
-// 2. CLASS GRAPHICS UTILS (VERSI ANDROID NATIVE CANVAS/PAINT)
-// ==========================================
 class GraphicsUtils {
 
-    /**
-     * Menggambar string pada Android Canvas dengan Auto-Scaling, Text Shadow, Arial Bold, dan Line Height.
-     * Fitur baru: Auto Font Size Reduction & Intelligent Text Wrapping
-     */
     public static void drawStringIntercepted(Canvas canvas, Paint paint, String str, float x, float y, int anchor) {
         if (str == null || str.trim().isEmpty() || canvas == null || paint == null) return;
 
         String teksBaru = TranslationManager.processString(str);
 
-        // Backup state paint asli
         Typeface oldTypeface = paint.getTypeface();
         boolean oldAntiAlias = paint.isAntiAlias();
         boolean oldSubpixel = paint.isSubpixelText();
-        float originalTextSize = paint.getTextSize() > 0 ? paint.getTextSize() : 13f;
+        float originalTextSize = paint.getTextSize();
 
-        // Terapkan Arial Bold & Anti-Aliasing
-        paint.setTypeface(Typeface.create("Arial", Typeface.BOLD));
+        float baseSize = originalTextSize > 0 ? originalTextSize : 11f;
+        float targetFontSize = Math.max(baseSize - 3f, 2.5f);
+
+        paint.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
+        paint.setTextSize(targetFontSize);
         paint.setAntiAlias(true);
         paint.setSubpixelText(true);
 
         try {
             float widthAsli = paint.measureText(str.trim());
-            
-            // Hitung tinggi bounding box (estimasi)
+            float maxDialogWidth = Math.max(widthAsli, canvas.getWidth() * 0.65f);
+
+            String wrappedText = wrapTextIntelligent(teksBaru, paint, maxDialogWidth);
+            String[] baris = wrappedText.split("\r?\n");
+
             Paint.FontMetrics fm = paint.getFontMetrics();
-            float lineHeight = (fm.descent - fm.ascent) * 1.6f;
+            float lineHeight = (fm.descent - fm.ascent) * 0.9f;
 
-            // Wrap text berdasarkan panjang teks asli
-            String wrappedText = wrapTextIntelligent(teksBaru, paint, widthAsli);
-            String[] baris = wrappedText.split("\n");
-
-            // Hitung ukuran yang dibutuhkan
-            float maxLineWidth = 0;
-            for (String line : baris) {
-                float lineWidth = paint.measureText(line);
-                if (lineWidth > maxLineWidth) {
-                    maxLineWidth = lineWidth;
-                }
-            }
-
-            // Jika text terlalu lebar, kurangi font size secara progresif
-            float fontSize = originalTextSize;
-            int attemptCount = 0;
-            while (maxLineWidth > widthAsli && fontSize > 4 && attemptCount < 10) {
-                fontSize -= 0.5f;
-                paint.setTextSize(fontSize);
-                
-                maxLineWidth = 0;
-                for (String line : baris) {
-                    float lineWidth = paint.measureText(line);
-                    if (lineWidth > maxLineWidth) {
-                        maxLineWidth = lineWidth;
-                    }
-                }
-                attemptCount++;
-            }
-
-            // Gambar setiap baris
-            if (baris.length > 0) {
-                Paint.FontMetrics fmAdjusted = paint.getFontMetrics();
-                float adjustedLineHeight = (fmAdjusted.descent - fmAdjusted.ascent) * 1.6f;
-
-                for (int i = 0; i < baris.length; i++) {
-                    float nextY = y + (i * adjustedLineHeight);
-                    renderAndScaleText(canvas, paint, str.trim(), baris[i], x, nextY, anchor);
-                }
+            for (int i = 0; i < baris.length; i++) {
+                float nextY = y + (i * lineHeight);
+                renderAndScaleText(canvas, paint, str.trim(), baris[i], x, nextY, anchor);
             }
 
         } finally {
-            // Restore state paint bawaan
             paint.setTextSize(originalTextSize);
             paint.setTypeface(oldTypeface);
             paint.setAntiAlias(oldAntiAlias);
@@ -415,16 +323,8 @@ class GraphicsUtils {
         }
     }
 
-    /**
-     * Wrap text secara intelligent berdasarkan lebar maksimal dari teks asli
-     */
     private static String wrapTextIntelligent(String text, Paint paint, float maxWidth) {
-        if (text == null || maxWidth <= 0) {
-            return text;
-        }
-
-        // Jika sudah ada newline, jangan modifikasi
-        if (text.contains("\n")) {
+        if (text == null || maxWidth <= 0 || text.contains("\n")) {
             return text;
         }
 
@@ -437,10 +337,7 @@ class GraphicsUtils {
         StringBuilder currentLine = new StringBuilder();
 
         for (String word : words) {
-            String testLine = currentLine.length() == 0 
-                ? word 
-                : currentLine.toString() + " " + word;
-
+            String testLine = currentLine.length() == 0 ? word : currentLine.toString() + " " + word;
             float lineWidth = paint.measureText(testLine);
 
             if (lineWidth <= maxWidth) {
@@ -449,7 +346,6 @@ class GraphicsUtils {
                 }
                 currentLine.append(word);
             } else {
-                // Line akan terlalu panjang
                 if (currentLine.length() > 0) {
                     result.append(currentLine.toString()).append("\n");
                 }
@@ -457,7 +353,6 @@ class GraphicsUtils {
             }
         }
 
-        // Tambahkan baris terakhir
         if (currentLine.length() > 0) {
             result.append(currentLine.toString());
         }
@@ -474,23 +369,24 @@ class GraphicsUtils {
         float drawX = alignX(x, widthAsli, anchor);
         float drawY = alignY(y, fm, anchor);
 
-        // Hanya scale jika benar-benar diperlukan dan tidak akan melebihi lebar asli
-        boolean butuhScaling = !teksRender.equals(teksAsli) && (widthBaru > widthAsli) && (widthBaru > 0) && (widthAsli > 0);
+        boolean butuhScaling = (teksRender.length() >= 25) || (!teksRender.equals(teksAsli) && (widthBaru > widthAsli) && (widthBaru > 0) && (widthAsli > 0));
 
         canvas.save();
         try {
             if (butuhScaling) {
                 float scaleX = widthAsli / widthBaru;
-                
-                // Jika scale factor terlalu kecil, gunakan font size reduction instead
-                if (scaleX < 0.6f) {
-                    // Font sudah dikurangi di drawStringIntercepted, jadi jangan scale lagi
-                    drawShadowAndText(canvas, paint, teksRender, drawX, drawY);
-                } else {
-                    canvas.translate(drawX, drawY);
-                    canvas.scale(scaleX, 1.0f);
-                    drawShadowAndText(canvas, paint, teksRender, 0, 0);
+
+                if (teksRender.length() >= 25 && scaleX > 0.75f) {
+                    scaleX = 0.75f;
                 }
+
+                if (scaleX < 0.45f) {
+                    scaleX = 0.45f;
+                }
+
+                canvas.translate(drawX, drawY);
+                canvas.scale(scaleX, 1.0f);
+                drawShadowAndText(canvas, paint, teksRender, 0, 0);
             } else {
                 drawShadowAndText(canvas, paint, teksRender, drawX, drawY);
             }
@@ -502,25 +398,23 @@ class GraphicsUtils {
     private static void drawShadowAndText(Canvas canvas, Paint paint, String text, float x, float y) {
         int originalColor = paint.getColor();
 
-        // 1. Text Shadow Hitam Transparan: 1px 1px offset
-        paint.setColor(Color.argb(140, 0, 0, 0));
-        canvas.drawText(text, x + 1f, y + 1f, paint);
+        paint.setColor(Color.argb(160, 0, 0, 0));
+        canvas.drawText(text, x + 0.5f, y + 0.5f, paint);
 
-        // 2. Teks Utama
         paint.setColor(originalColor);
         canvas.drawText(text, x, y, paint);
     }
 
     private static float alignX(float x, float width, int anchor) {
-        if ((anchor & 1) != 0) return x - (width / 2f); // HCENTER
-        if ((anchor & 8) != 0) return x - width;         // RIGHT
-        return x;                                        // LEFT
+        if ((anchor & 1) != 0) return x - (width / 2f);
+        if ((anchor & 8) != 0) return x - width;
+        return x;
     }
 
     private static float alignY(float y, Paint.FontMetrics fm, int anchor) {
-        if ((anchor & 16) != 0) return y - fm.ascent;                  // TOP
-        if ((anchor & 32) != 0) return y - (fm.ascent + fm.descent)/2f; // VCENTER
-        if ((anchor & 64) != 0) return y - fm.descent;                 // BOTTOM
-        return y;                                                      // Baseline default
+        if ((anchor & 16) != 0) return y - fm.ascent;
+        if ((anchor & 32) != 0) return y - (fm.ascent + fm.descent)/2f;
+        if ((anchor & 64) != 0) return y - fm.descent;
+        return y;
     }
-        }
+}
