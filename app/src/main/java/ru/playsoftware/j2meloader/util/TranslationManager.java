@@ -82,9 +82,15 @@ public class TranslationManager {
             while ((line = reader.readLine()) != null) {
                 sb.append(line);
             }
-            if (sb.length() == 0) return;
             
-            JSONObject json = new JSONObject(sb.toString());
+            String jsonString = sb.toString().trim();
+            if (jsonString.startsWith("\uFEFF")) {
+                jsonString = jsonString.substring(1);
+            }
+
+            if (jsonString.isEmpty()) return;
+            
+            JSONObject json = new JSONObject(jsonString);
             Iterator<String> keys = json.keys();
             while (keys.hasNext()) {
                 String key = keys.next();
@@ -106,9 +112,15 @@ public class TranslationManager {
             while ((line = reader.readLine()) != null) {
                 sb.append(line);
             }
-            if (sb.length() == 0) return;
+            
+            String jsonString = sb.toString().trim();
+            if (jsonString.startsWith("\uFEFF")) {
+                jsonString = jsonString.substring(1);
+            }
 
-            JSONObject json = new JSONObject(sb.toString());
+            if (jsonString.isEmpty()) return;
+
+            JSONObject json = new JSONObject(jsonString);
             Iterator<String> keys = json.keys();
             while (keys.hasNext()) {
                 String key = keys.next();
@@ -189,7 +201,6 @@ public class TranslationManager {
         if (original == null) return original;
         
         String trimmed = original.trim();
-        
         if (trimmed.isEmpty() || trimmed.length() <= 1 || trimmed.matches("^\\d+$")) {
             return original;
         }
@@ -229,9 +240,9 @@ public class TranslationManager {
             URL url = new URL(urlStr);
             conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("GET");
-            conn.setConnectTimeout(3000);
-            conn.setReadTimeout(3000);
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0");
+            conn.setConnectTimeout(4000);
+            conn.setReadTimeout(4000);
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
 
             if (conn.getResponseCode() == 200) {
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
@@ -242,13 +253,17 @@ public class TranslationManager {
                     }
 
                     JSONArray jsonArray = new JSONArray(response.toString());
-                    if (jsonArray.length() > 0) {
+                    if (jsonArray.length() > 0 && !jsonArray.isNull(0)) {
                         JSONArray sentences = jsonArray.getJSONArray(0);
                         StringBuilder translatedResult = new StringBuilder();
 
                         for (int i = 0; i < sentences.length(); i++) {
-                            JSONArray sentence = sentences.getJSONArray(i);
-                            translatedResult.append(sentence.getString(0));
+                            if (!sentences.isNull(i)) {
+                                JSONArray sentence = sentences.getJSONArray(i);
+                                if (!sentence.isNull(0)) {
+                                    translatedResult.append(sentence.getString(0));
+                                }
+                            }
                         }
 
                         String hasilTranslate = translatedResult.toString();
@@ -292,8 +307,8 @@ class GraphicsUtils {
         boolean oldSubpixel = paint.isSubpixelText();
         float originalTextSize = paint.getTextSize();
 
-        float baseSize = originalTextSize > 0 ? originalTextSize : 11f;
-        float targetFontSize = Math.max(baseSize - 3f, 2.5f);
+        // Kurangi font 2.5px dari ukuran asli game agar pas di box
+        float targetFontSize = Math.max((originalTextSize > 0 ? originalTextSize : 12f) - 2.5f, 8f);
 
         paint.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
         paint.setTextSize(targetFontSize);
@@ -302,62 +317,13 @@ class GraphicsUtils {
 
         try {
             float widthAsli = paint.measureText(str.trim());
-            float maxDialogWidth = Math.max(widthAsli, canvas.getWidth() * 0.65f);
-
-            String wrappedText = wrapTextIntelligent(teksBaru, paint, maxDialogWidth);
-            String[] baris = wrappedText.split("\r?\n");
-
-            Paint.FontMetrics fm = paint.getFontMetrics();
-            float lineHeight = (fm.descent - fm.ascent) * 0.9f;
-
-            for (int i = 0; i < baris.length; i++) {
-                float nextY = y + (i * lineHeight);
-                renderAndScaleText(canvas, paint, str.trim(), baris[i], x, nextY, anchor);
-            }
-
+            renderAndScaleText(canvas, paint, str.trim(), teksBaru, x, y, anchor);
         } finally {
             paint.setTextSize(originalTextSize);
             paint.setTypeface(oldTypeface);
             paint.setAntiAlias(oldAntiAlias);
             paint.setSubpixelText(oldSubpixel);
         }
-    }
-
-    private static String wrapTextIntelligent(String text, Paint paint, float maxWidth) {
-        if (text == null || maxWidth <= 0 || text.contains("\n")) {
-            return text;
-        }
-
-        String[] words = text.split(" ");
-        if (words.length <= 1) {
-            return text;
-        }
-
-        StringBuilder result = new StringBuilder();
-        StringBuilder currentLine = new StringBuilder();
-
-        for (String word : words) {
-            String testLine = currentLine.length() == 0 ? word : currentLine.toString() + " " + word;
-            float lineWidth = paint.measureText(testLine);
-
-            if (lineWidth <= maxWidth) {
-                if (currentLine.length() > 0) {
-                    currentLine.append(" ");
-                }
-                currentLine.append(word);
-            } else {
-                if (currentLine.length() > 0) {
-                    result.append(currentLine.toString()).append("\n");
-                }
-                currentLine = new StringBuilder(word);
-            }
-        }
-
-        if (currentLine.length() > 0) {
-            result.append(currentLine.toString());
-        }
-
-        return result.toString();
     }
 
     private static void renderAndScaleText(Canvas canvas, Paint paint, String teksAsli, String teksRender, float x, float y, int anchor) {
@@ -369,21 +335,12 @@ class GraphicsUtils {
         float drawX = alignX(x, widthAsli, anchor);
         float drawY = alignY(y, fm, anchor);
 
-        boolean butuhScaling = (teksRender.length() >= 25) || (!teksRender.equals(teksAsli) && (widthBaru > widthAsli) && (widthBaru > 0) && (widthAsli > 0));
+        boolean butuhScaling = !teksRender.equals(teksAsli) && (widthBaru > widthAsli) && (widthBaru > 0) && (widthAsli > 0);
 
         canvas.save();
         try {
             if (butuhScaling) {
                 float scaleX = widthAsli / widthBaru;
-
-                if (teksRender.length() >= 25 && scaleX > 0.75f) {
-                    scaleX = 0.75f;
-                }
-
-                if (scaleX < 0.45f) {
-                    scaleX = 0.45f;
-                }
-
                 canvas.translate(drawX, drawY);
                 canvas.scale(scaleX, 1.0f);
                 drawShadowAndText(canvas, paint, teksRender, 0, 0);
@@ -399,7 +356,7 @@ class GraphicsUtils {
         int originalColor = paint.getColor();
 
         paint.setColor(Color.argb(160, 0, 0, 0));
-        canvas.drawText(text, x + 0.5f, y + 0.5f, paint);
+        canvas.drawText(text, x + 1f, y + 1f, paint);
 
         paint.setColor(originalColor);
         canvas.drawText(text, x, y, paint);
