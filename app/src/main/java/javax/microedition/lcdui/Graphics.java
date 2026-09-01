@@ -48,6 +48,7 @@ public class Graphics implements
 		com.vodafone.v10.graphics.j3d.Graphics3D,
 		com.motorola.graphics.j3d.Graphics3D,
 		com.jblend.graphics.j3d.Graphics3D {
+	
 	public static final int HCENTER = 1;
 	public static final int VCENTER = 2;
 	public static final int LEFT = 4;
@@ -87,9 +88,12 @@ public class Graphics implements
 	private final Map<String, String> translations = new HashMap<>();
 	private final Set<String> dumpedTexts = new HashSet<>();
 	
-	private int maxTextWidth = 150;
-	private boolean autoScaleFontForLongText = true;
-	private float minFontScale = 0.7f;
+	// ===== TEXT COMPRESSION SETTINGS =====
+	private boolean autoCompressText = true;
+	private float maxCompressionRatio = 0.5f;  // Maksimal kompresi 50% (jangan terlalu pipih)
+	private float minReadableTextSize = 8f;    // Ukuran minimum yang masih readable
+	private boolean trimExtraSpacesEnabled = true;
+	private float canvasWidthFallback = 0.85f;  // 85% dari lebar canvas jika tidak ada clip
 
 	Graphics(Image image) {
 		this.image = image;
@@ -334,6 +338,11 @@ public class Graphics implements
 			textToDraw = translations.get(originalText);
 		}
 
+		// Trim spasi berlebih
+		if (trimExtraSpacesEnabled) {
+			textToDraw = trimExtraSpaces(textToDraw);
+		}
+
 		Paint paint = font.paint;
 		if ((anchor & Graphics.RIGHT) != 0) {
 			paint.setTextAlign(Paint.Align.RIGHT);
@@ -355,7 +364,13 @@ public class Graphics implements
 		}
 
 		paint.setColor(fillPaint.getColor());
-		canvas.drawText(textToDraw.toCharArray(), 0, textToDraw.length(), x, ly, paint);
+		
+		// Gambar dengan kompresi jika perlu
+		if (autoCompressText) {
+			drawCompressedText(textToDraw, x, ly, paint);
+		} else {
+			canvas.drawText(textToDraw, x, ly, paint);
+		}
 
 		if (textDumpEnabled) {
 			if (!translations.containsKey(originalText) && !dumpedTexts.contains(originalText)) {
@@ -374,6 +389,11 @@ public class Graphics implements
 			text = TranslationManager.processString(text);
 		}
 
+		// Trim spasi berlebih
+		if (trimExtraSpacesEnabled) {
+			text = trimExtraSpaces(text);
+		}
+
 		Paint paint = font.paint;
 		if ((anchor & Graphics.RIGHT) != 0) {
 			paint.setTextAlign(Paint.Align.RIGHT);
@@ -396,22 +416,157 @@ public class Graphics implements
 
 		paint.setColor(fillPaint.getColor());
 		
-		float textWidth = paint.measureText(text);
-		if (textWidth > maxTextWidth && autoScaleFontForLongText) {
-			float scaleFactor = maxTextWidth / textWidth;
-			scaleFactor = Math.max(scaleFactor, minFontScale);
-			paint.setTextScaleX(scaleFactor);
+		// Gambar dengan kompresi jika perlu
+		if (autoCompressText) {
+			drawCompressedText(text, x, ly, paint);
 		} else {
-			paint.setTextScaleX(1.0f);
+			canvas.drawText(text, x, ly, paint);
 		}
-		
-		canvas.drawText(text, x, ly, paint);
 
 		if (textDumpEnabled) {
 			if (!translations.containsKey(originalText) && !dumpedTexts.contains(originalText)) {
 				dumpedTexts.add(originalText);
 			}
 		}
+	}
+
+	// ===== TEXT COMPRESSION METHODS =====
+	
+	/**
+	 * Trim spasi berlebih dari teks
+	 */
+	private String trimExtraSpaces(String text) {
+		if (text == null || text.isEmpty()) return text;
+		
+		// Trim awal dan akhir
+		text = text.trim();
+		
+		// Ganti multiple spaces dengan single space
+		text = text.replaceAll("\\s+", " ");
+		
+		// Hapus spasi sebelum tanda baca
+		text = text.replaceAll("\\s+([,.!?;:])", "$1");
+		
+		return text;
+	}
+	
+	/**
+	 * Gambar teks dengan kompresi adaptif
+	 */
+	private void drawCompressedText(String text, float x, float y, Paint paint) {
+		if (text == null || text.isEmpty()) return;
+		
+		float maxWidth = getAvailableWidth();
+		float textWidth = paint.measureText(text);
+		
+		// Jika teks sudah muat, gambar normal
+		if (textWidth <= maxWidth) {
+			canvas.drawText(text, x, y, paint);
+			return;
+		}
+		
+		// Simpan state asli
+		float originalTextSize = paint.getTextSize();
+		float originalScaleX = paint.getTextScaleX();
+		
+		// ==== LEVEL 1: Horizontal Compression (squish) ====
+		float scaleX = maxWidth / textWidth;
+		
+		if (scaleX >= maxCompressionRatio) {
+			// Kompresi masih dalam batas wajar
+			paint.setTextScaleX(scaleX);
+			canvas.drawText(text, x, y, paint);
+			
+			// Reset
+			paint.setTextScaleX(originalScaleX);
+			return;
+		}
+		
+		// ==== LEVEL 2: Kombinasi scale down + squish ====
+		// Kecilkan ukuran font secara bertahap
+		float newTextSize = originalTextSize;
+		float finalScaleX = scaleX;
+		
+		while (finalScaleX < maxCompressionRatio && newTextSize > minReadableTextSize) {
+			// Kurangi ukuran font 5%
+			newTextSize *= 0.95f;
+			paint.setTextSize(newTextSize);
+			
+			// Hitung ulang
+			textWidth = paint.measureText(text);
+			finalScaleX = maxWidth / textWidth;
+		}
+		
+		// Terapkan kompresi final
+		finalScaleX = Math.max(finalScaleX, maxCompressionRatio);
+		paint.setTextScaleX(finalScaleX);
+		canvas.drawText(text, x, y, paint);
+		
+		// Reset semua
+		paint.setTextSize(originalTextSize);
+		paint.setTextScaleX(originalScaleX);
+	}
+	
+	/**
+	 * Dapatkan lebar yang tersedia untuk menggambar teks
+	 */
+	private float getAvailableWidth() {
+		// Cek clip region terlebih dahulu
+		if (clip.width() > 0 && clip.width() < canvas.getWidth()) {
+			return clip.width();
+		}
+		
+		// Fallback ke canvas width
+		if (canvas.getWidth() > 0) {
+			return canvas.getWidth() * canvasWidthFallback;
+		}
+		
+		// Default
+		return 150;
+	}
+	
+	/**
+	 * Set pengaturan kompresi teks
+	 */
+	public void setTextCompressionSettings(boolean enabled, float maxRatio, float minSize) {
+		this.autoCompressText = enabled;
+		this.maxCompressionRatio = Math.max(0.3f, Math.min(0.9f, maxRatio));
+		this.minReadableTextSize = Math.max(4f, minSize);
+	}
+	
+	/**
+	 * Enable/disable auto kompresi teks
+	 */
+	public void setAutoCompressText(boolean enabled) {
+		this.autoCompressText = enabled;
+	}
+	
+	/**
+	 * Set rasio kompresi maksimal (0.3 - 0.9)
+	 */
+	public void setMaxCompressionRatio(float ratio) {
+		this.maxCompressionRatio = Math.max(0.3f, Math.min(0.9f, ratio));
+	}
+	
+	/**
+	 * Set ukuran font minimum yang masih readable
+	 */
+	public void setMinReadableTextSize(float size) {
+		this.minReadableTextSize = Math.max(4f, size);
+	}
+	
+	/**
+	 * Enable/disable trim spasi berlebih
+	 */
+	public void setTrimExtraSpaces(boolean enabled) {
+		this.trimExtraSpacesEnabled = enabled;
+	}
+	
+	/**
+	 * Set fallback width sebagai persentase dari canvas (0.5 - 1.0)
+	 */
+	public void setCanvasWidthFallback(float percentage) {
+		this.canvasWidthFallback = Math.max(0.5f, Math.min(1.0f, percentage));
 	}
 
 	public void drawImage(Image image, int x, int y, int anchor) {
@@ -705,13 +860,5 @@ public class Graphics implements
 			}
 		}
 		return sb.toString();
-	}
-
-	public void setMaxTextWidth(int widthPixels) {
-		this.maxTextWidth = widthPixels;
-	}
-
-	public void setAutoScaleFontForLongText(boolean enabled) {
-		this.autoScaleFontForLongText = enabled;
 	}
 }
