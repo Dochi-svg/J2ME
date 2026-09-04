@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>J2ME Memory Debugger - CheatEngine Style</title>
+    <style>
+        * { font-family: Arial, sans-serif; }
+        body { background: #1e1e1e; color: #00ff00; padding: 20px; }
+        .container { max-width: 1000px; margin: 0 auto; }
+        .panel { background: #2d2d2d; border: 2px solid #00ff00; padding: 15px; margin: 10px 0; }
+        h1 { color: #ffff00; text-shadow: 0 0 10px #00ff00; }
+        h2 { color: #00ff00; border-bottom: 2px solid #00ff00; padding-bottom: 10px; }
+        input, select { 
+            background: #333; color: #00ff00; border: 1px solid #00ff00;
+            padding: 8px; margin: 5px; width: 200px;
+        }
+        button {
+            background: #00ff00; color: #000; padding: 10px 20px; cursor: pointer;
+            border: none; font-weight: bold; margin: 5px;
+            transition: all 0.3s;
+        }
+        button:hover { background: #00cc00; transform: scale(1.05); }
+        button:disabled { background: #666; cursor: not-allowed; opacity: 0.5; }
+        .memory-info { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .stat { background: #333; padding: 10px; border-left: 3px solid #00ff00; }
+        .stat-value { font-size: 18px; font-weight: bold; }
+        #output { 
+            background: #000; height: 200px; overflow-y: auto; 
+            padding: 10px; border: 1px solid #00ff00; margin-top: 10px;
+        }
+        .log-entry { padding: 5px; border-bottom: 1px solid #444; font-size: 12px; }
+        .log-success { color: #00ff00; }
+        .log-error { color: #ff0000; }
+        .log-info { color: #00aaff; }
+        .log-warning { color: #ffff00; }
+        #status { 
+            padding: 10px; text-align: center; font-weight: bold;
+            border-radius: 5px; margin-bottom: 10px;
+        }
+        .connected { background: #00ff00; color: #000; }
+        .disconnected { background: #ff0000; color: #fff; }
+        .results-container { background: #000; padding: 10px; margin-top: 10px; border: 1px solid #00ff00; max-height: 300px; overflow-y: auto; }
+        .result-item { 
+            padding: 8px; margin: 3px 0; background: #333; border-radius: 3px; 
+            font-family: monospace; display: flex; justify-content: space-between; align-items: center;
+        }
+        .scan-history { background: #333; padding: 10px; margin-top: 10px; border-left: 3px solid #00aaff; }
+        .history-item { padding: 5px; margin: 3px 0; background: #000; border-radius: 3px; font-size: 12px; }
+        .button-group { display: flex; gap: 5px; flex-wrap: wrap; }
+        .inject-section { background: #3d1f1f; border-left: 3px solid #ff0000; padding: 10px; margin-top: 10px; border-radius: 3px; }
+        .section-title { color: #ffff00; font-weight: bold; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎮 J2ME Memory Debugger (First Scan → Next Scan → Inject)</h1>
+        
+        <div id="status" class="disconnected">⚠️ Disconnected</div>
+
+        <div class="panel">
+            <h2>📊 Memory Info</h2>
+            <div class="memory-info">
+                <div class="stat">
+                    <div>Used Memory</div>
+                    <div class="stat-value" id="usedMem">0x00000000</div>
+                </div>
+                <div class="stat">
+                    <div>Free Memory</div>
+                    <div class="stat-value" id="freeMem">0x00000000</div>
+                </div>
+                <div class="stat">
+                    <div>Total Memory</div>
+                    <div class="stat-value" id="totalMem">0x00000000</div>
+                </div>
+                <div class="stat">
+                    <div>Max Memory</div>
+                    <div class="stat-value" id="maxMem">0x00000000</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>🔍 FIRST SCAN - Cari Value Awal</h2>
+            <div>
+                <label>Cari Value:</label>
+                <input type="text" id="firstScanValue" placeholder="100" value="100">
+                
+                <label>Data Type:</label>
+                <select id="firstScanType">
+                    <option value="byte">Byte</option>
+                    <option value="int" selected>Int (32-bit)</option>
+                    <option value="long">Long (64-bit)</option>
+                    <option value="float">Float</option>
+                </select>
+                
+                <label>Start Address:</label>
+                <input type="text" id="firstStartAddr" placeholder="0x00001000" value="0x00001000">
+                
+                <label>End Address:</label>
+                <input type="text" id="firstEndAddr" placeholder="0x03FFFFFF" value="0x03FFFFFF">
+                
+                <button onclick="firstScan()" style="background: #00ff00; width: auto;">🔎 FIRST SCAN</button>
+                <button onclick="clearScan()" style="background: #ff6600; width: auto;">🗑️ Clear Results</button>
+            </div>
+
+            <div class="scan-history">
+                <div class="section-title">📊 Scan History</div>
+                <div id="scanHistory"></div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>🔄 NEXT SCAN - Filter Hasil (Opsional)</h2>
+            <div>
+                <p style="color: #ffff00;">💡 Jika ada hasil dari First Scan, gunakan Next Scan untuk memperkecil hasil</p>
+                
+                <label>New Value (untuk filter):</label>
+                <input type="text" id="nextScanValue" placeholder="150" value="150">
+                
+                <label>Data Type:</label>
+                <select id="nextScanType">
+                    <option value="byte">Byte</option>
+                    <option value="int" selected>Int (32-bit)</option>
+                    <option value="long">Long (64-bit)</option>
+                    <option value="float">Float</option>
+                </select>
+                
+                <button onclick="nextScan()" style="background: #0088ff; width: auto;" id="nextScanBtn" disabled>↻ NEXT SCAN</button>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>📌 Hasil Scan</h2>
+            <div style="background: #333; padding: 10px; margin-bottom: 10px; border-radius: 3px;">
+                <span style="color: #00ff00; font-weight: bold;">Total Matches: <span id="totalMatches">0</span></span>
+                <span style="color: #00aaff; margin-left: 20px;">Ditampilkan: <span id="displayedMatches">0</span> / 100</span>
+            </div>
+            <div id="resultsContainer" style="display:none;">
+                <div id="results" class="results-container"></div>
+            </div>
+            <div id="noResults" style="color: #ff6600; text-align: center; padding: 20px; display: none;">
+                ⚠️ Belum ada hasil scan. Lakukan First Scan terlebih dahulu.
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>💉 INJECT - Ubah Nilai ke Semua Alamat</h2>
+            <div class="inject-section">
+                <div class="section-title">⚠️ HATI-HATI! Operasi ini akan mengubah nilai di SEMUA alamat yang ditemukan</div>
+                
+                <label>Nilai Baru (untuk inject):</label>
+                <input type="text" id="injectValue" placeholder="9999" value="9999">
+                
+                <label>Data Type:</label>
+                <select id="injectType">
+                    <option value="byte">Byte</option>
+                    <option value="int" selected>Int (32-bit)</option>
+                    <option value="long">Long (64-bit)</option>
+                    <option value="float">Float</option>
+                </select>
+                
+                <div style="margin-top: 10px;">
+                    <button onclick="injectSingle()" style="background: #ff6600; width: auto;" id="injectSingleBtn" disabled>
+                        💉 Inject ke Alamat Dipilih
+                    </button>
+                    <button onclick="injectAll()" style="background: #ff0000; width: auto;" id="injectAllBtn" disabled>
+                        💉💉 Inject ke SEMUA Hasil
+                    </button>
+                    <button onclick="resetInject()" style="background: #666; width: auto;">🔄 Reset</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>📝 Read Memory (Manual)</h2>
+            <div>
+                <label>Address:</label>
+                <input type="text" id="readAddr" placeholder="0x00000000" value="0x00000000">
+                
+                <label>Data Type:</label>
+                <select id="readType">
+                    <option value="byte">Byte</option>
+                    <option value="int" selected>Int (32-bit)</option>
+                    <option value="long">Long (64-bit)</option>
+                    <option value="float">Float</option>
+                </select>
+                
+                <label>Size:</label>
+                <input type="text" id="readSize" placeholder="4" value="4">
+                
+                <button onclick="readMemory()">📖 Read</button>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>📋 Log</h2>
+            <div id="output"></div>
+        </div>
+    </div>
+
+    <script>
+        const ws = new WebSocket("ws://localhost:8080");
+        const output = document.getElementById('output');
+        const status = document.getElementById('status');
+        
+        let scanResults = []; // Simpan hasil First Scan
+        let selectedAddresses = new Set(); // Alamat yang dipilih untuk inject
+
+        ws.onopen = () => {
+            log("✓ Connected to Memory Debugger!", "log-success");
+            status.textContent = "🟢 Connected";
+            status.className = "connected";
+            sendCommand({ type: "getBufferInfo" });
+        };
+
+        ws.onmessage = (e) => {
+            try {
+                const data = JSON.parse(e.data);
+                
+                if (data.type === "memory") {
+                    document.getElementById('usedMem').textContent = data.used;
+                    document.getElementById('freeMem').textContent = data.free;
+                    document.getElementById('totalMem').textContent = data.total;
+                    document.getElementById('maxMem').textContent = data.max;
+                } else if (data.type === "ok") {
+                    log("✓ " + data.data, "log-success");
+                } else if (data.type === "error") {
+                    log("✗ Error: " + data.data, "log-error");
+                } else if (data.type === "value") {
+                    log("📖 Read Result: " + data.data, "log-info");
+                } else if (data.type === "search_result") {
+                    displaySearchResults(JSON.parse(data.data));
+                } else if (data.type === "buffer_info") {
+                    const info = JSON.parse(data.data);
+                    log("📦 Buffer: " + info.sizeMB + " MB (" + info.start + " - " + info.end + ")", "log-info");
+                }
+            } catch (e) {
+                console.error("Parse error:", e);
+            }
+        };
+
+        ws.onerror = (err) => {
+            log("✗ Connection Error!", "log-error");
+            console.error(err);
+        };
+
+        ws.onclose = () => {
+            log("⚠️ Disconnected", "log-error");
+            status.textContent = "🔴 Disconnected";
+            status.className = "disconnected";
+        };
+
+        function firstScan() {
+            const value = document.getElementById('firstScanValue').value;
+            const type = document.getElementById('firstScanType').value;
+            const startAddr = document.getElementById('firstStartAddr').value;
+            const endAddr = document.getElementById('firstEndAddr').value;
+            
+            scanResults = []; // Reset hasil sebelumnya
+            selectedAddresses.clear();
+            
+            const cmd = {
+                type: "search",
+                value: value,
+                dataType: type,
+                startAddr: startAddr,
+                endAddr: endAddr
+            };
+            
+            sendCommand(cmd);
+            log("🔍 FIRST SCAN: Searching for " + value + " (" + type + ")", "log-warning");
+            addScanHistory("FIRST SCAN", value, type, startAddr, endAddr);
+        }
+
+        function nextScan() {
+            if (scanResults.length === 0) {
+                log("✗ Tidak ada hasil scan sebelumnya! Lakukan First Scan dulu.", "log-error");
+                return;
+            }
+
+            const value = document.getElementById('nextScanValue').value;
+            const type = document.getElementById('nextScanType').value;
+            
+            // Filter results: baca value di setiap alamat, cek apakah match dengan value baru
+            let filteredResults = [];
+            
+            // Simulasi: dalam praktik nyata, service akan melakukan ini
+            // Untuk sekarang, kami hanya notify bahwa Next Scan dimulai
+            log("🔄 NEXT SCAN: Filtering " + scanResults.length + " alamat untuk value " + value + " (" + type + ")", "log-warning");
+            log("⏳ Next Scan sedang diproses...", "log-info");
+            
+            // Dalam implementasi real, kirim ke service: search di alamat-alamat sebelumnya
+            const cmd = {
+                type: "nextSearch",
+                value: value,
+                dataType: type,
+                previousResults: scanResults.slice(0, 100) // Kirim max 100
+            };
+            
+            sendCommand(cmd);
+            addScanHistory("NEXT SCAN", value, type, "-", "-");
+        }
+
+        function displaySearchResults(data) {
+            const resultsContainer = document.getElementById('resultsContainer');
+            const resultsDiv = document.getElementById('results');
+            const noResults = document.getElementById('noResults');
+            
+            resultsDiv.innerHTML = '';
+            
+            if (data.results && data.results.length > 0) {
+                scanResults = data.results; // Simpan untuk Next Scan
+                
+                let html = `<p><strong>Range:</strong> ${data.scanRange.start} - ${data.scanRange.end}</p>`;
+                html += `<p><strong>Found:</strong> ${data.found} matches</p>`;
+                html += `<hr style="border-color: #00ff00;">`;
+                
+                data.results.forEach(addr => {
+                    html += `
+                        <div class="result-item">
+                            <div>
+                                <input type="checkbox" id="addr_${addr}" class="addr-checkbox" 
+                                       data-addr="${addr}" onchange="updateSelectedAddresses()">
+                                <span style="margin-left: 10px;">📍 ${addr}</span>
+                            </div>
+                            <div>
+                                <button onclick="copyToClipboard('${addr}')" style="padding: 5px 10px; font-size: 11px;">Copy</button>
+                                <button onclick="loadToRead('${addr}')" style="padding: 5px 10px; font-size: 11px;">Read</button>
+                            </div>
+                        </div>
+                    `;
+                });
+                
+                resultsDiv.innerHTML = html;
+                resultsContainer.style.display = 'block';
+                noResults.style.display = 'none';
+                
+                document.getElementById('totalMatches').textContent = data.found;
+                document.getElementById('displayedMatches').textContent = data.results.length;
+                
+                // Enable Next Scan & Inject buttons
+                document.getElementById('nextScanBtn').disabled = false;
+                document.getElementById('injectAllBtn').disabled = false;
+                
+                log("🎯 Found " + data.found + " matches! (" + data.results.length + " ditampilkan)", "log-success");
+            } else {
+                resultsContainer.style.display = 'none';
+                noResults.style.display = 'block';
+                document.getElementById('totalMatches').textContent = '0';
+                document.getElementById('displayedMatches').textContent = '0';
+                log("❌ No matches found!", "log-error");
+            }
+        }
+
+        function addScanHistory(scanType, value, dataType, startAddr, endAddr) {
+            const history = document.getElementById('scanHistory');
+            const item = document.createElement('div');
+            item.className = 'history-item';
+            
+            const time = new Date().toLocaleTimeString();
+            let text = `[${time}] <strong>${scanType}</strong> - Value: ${value} (${dataType})`;
+            if (startAddr !== '-') {
+                text += ` | Range: ${startAddr} ~ ${endAddr}`;
+            }
+            
+            item.innerHTML = text;
+            history.appendChild(item);
+            history.scrollTop = history.scrollHeight;
+        }
+
+        function updateSelectedAddresses() {
+            selectedAddresses.clear();
+            document.querySelectorAll('.addr-checkbox:checked').forEach(checkbox => {
+                selectedAddresses.add(checkbox.dataset.addr);
+            });
+            
+            document.getElementById('injectSingleBtn').disabled = selectedAddresses.size === 0;
+            
+            if (selectedAddresses.size > 0) {
+                log(`✓ Selected ${selectedAddresses.size} alamat untuk inject`, "log-info");
+            }
+        }
+
+        function injectSingle() {
+            if (selectedAddresses.size === 0) {
+                log("✗ Pilih minimal 1 alamat!", "log-error");
+                return;
+            }
+
+            const injectValue = document.getElementById('injectValue').value;
+            const injectType = document.getElementById('injectType').value;
+            
+            log(`💉 Injecting ${injectValue} (${injectType}) ke ${selectedAddresses.size} alamat...`, "log-warning");
+            
+            selectedAddresses.forEach(addr => {
+                const cmd = {
+                    type: "write",
+                    address: addr,
+                    value: injectValue,
+                    dataType: injectType
+                };
+                sendCommand(cmd);
+            });
+            
+            log(`✓ Inject selesai! ${selectedAddresses.size} alamat diubah.`, "log-success");
+        }
+
+        function injectAll() {
+            if (scanResults.length === 0) {
+                log("✗ Tidak ada hasil untuk di-inject!", "log-error");
+                return;
+            }
+
+            if (!confirm(`⚠️ Yakin inject ${scanResults.length} alamat sekaligus?\n\nValue: ${document.getElementById('injectValue').value}`)) {
+                return;
+            }
+
+            const injectValue = document.getElementById('injectValue').value;
+            const injectType = document.getElementById('injectType').value;
+            
+            log(`💉💉 INJECTING KE SEMUA ${scanResults.length} ALAMAT...`, "log-error");
+            
+            let count = 0;
+            scanResults.forEach(addr => {
+                const cmd = {
+                    type: "write",
+                    address: addr,
+                    value: injectValue,
+                    dataType: injectType
+                };
+                sendCommand(cmd);
+                count++;
+            });
+            
+            log(`✅ Inject Selesai! ${count} alamat telah diubah ke ${injectValue}`, "log-success");
+        }
+
+        function resetInject() {
+            selectedAddresses.clear();
+            document.querySelectorAll('.addr-checkbox').forEach(cb => cb.checked = false);
+            document.getElementById('injectValue').value = '';
+            document.getElementById('injectSingleBtn').disabled = true;
+            log("🔄 Inject reset", "log-info");
+        }
+
+        function clearScan() {
+            scanResults = [];
+            selectedAddresses.clear();
+            document.getElementById('resultsContainer').style.display = 'none';
+            document.getElementById('noResults').style.display = 'block';
+            document.getElementById('nextScanBtn').disabled = true;
+            document.getElementById('injectAllBtn').disabled = true;
+            document.getElementById('injectSingleBtn').disabled = true;
+            document.getElementById('totalMatches').textContent = '0';
+            document.getElementById('displayedMatches').textContent = '0';
+            log("🗑️ Results cleared", "log-info");
+        }
+
+        function readMemory() {
+            const addr = document.getElementById('readAddr').value;
+            const type = document.getElementById('readType').value;
+            const size = document.getElementById('readSize').value;
+            
+            const cmd = {
+                type: "read",
+                address: addr,
+                dataType: type,
+                size: size
+            };
+            
+            sendCommand(cmd);
+            log("📖 Reading from " + addr, "log-info");
+        }
+
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text);
+            log("📋 Copied: " + text, "log-info");
+        }
+
+        function loadToRead(addr) {
+            document.getElementById('readAddr').value = addr;
+            log("📍 Loaded address: " + addr, "log-info");
+        }
+
+        function sendCommand(cmd) {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify(cmd));
+            } else {
+                log("✗ Not connected!", "log-error");
+            }
+        }
+
+        function log(msg, className = "log-entry") {
+            const entry = document.createElement('div');
+            entry.className = className;
+            entry.textContent = new Date().toLocaleTimeString() + " - " + msg;
+            output.appendChild(entry);
+            output.scrollTop = output.scrollHeight;
+        }
+    </script>
+</body>
+</html>
