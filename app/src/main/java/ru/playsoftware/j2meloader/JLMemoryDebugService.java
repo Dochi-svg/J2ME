@@ -1,6 +1,7 @@
 package ru.playsoftware.j2meloader;
 
 import java.io.BufferedReader;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.ServerSocket;
@@ -14,9 +15,10 @@ import java.util.List;
 
 public class JLMemoryDebugService implements Runnable {
 
-    private static final int MEMORY_SIZE = 0x03FFFFFF; 
+    // Memori 64 MB (0x04000000 Byte)
+    private static final int MEMORY_SIZE = 0x04000000; 
     private static final byte[] memoryBuffer = new byte[MEMORY_SIZE];
-    private int port;
+    private final int port;
 
     public JLMemoryDebugService(int port) {
         this.port = port;
@@ -26,13 +28,13 @@ public class JLMemoryDebugService implements Runnable {
     public void run() {
         initDummyMemory();
 
-        System.out.println("=== J2ME Memory Debugger Server (Little-Endian) ===");
+        System.out.println("=== J2ME Memory Debugger Server (64MB Little-Endian) ===");
         System.out.println("Listening on ws://localhost:" + port);
 
         try (ServerSocket serverSocket = new ServerSocket(port)) {
             while (true) {
                 Socket clientSocket = serverSocket.accept();
-                new Thread(new ClientHandler(clientSocket)).start();
+                new Thread(new ClientHandler(clientSocket), "J2ME-DebugClient").start();
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -40,18 +42,14 @@ public class JLMemoryDebugService implements Runnable {
     }
 
     private static void initDummyMemory() {
-        // Mengisi memori dengan angka dummy (Little-Endian)
-        // Menulis angka Int 100 di alamat 0x00002000
+        ByteBuffer.wrap(memoryBuffer, 0x00000010, 4)
+                  .order(ByteOrder.LITTLE_ENDIAN)
+                  .putInt(50); // Test angka kecil di offset awal
+
         ByteBuffer.wrap(memoryBuffer, 0x00002000, 4)
                   .order(ByteOrder.LITTLE_ENDIAN)
                   .putInt(100);
 
-        // Menulis angka Int 100 di alamat 0x00002005 (unaligned test)
-        ByteBuffer.wrap(memoryBuffer, 0x00002005, 4)
-                  .order(ByteOrder.LITTLE_ENDIAN)
-                  .putInt(100);
-
-        // Menulis Float 99.5f di alamat 0x00003000
         ByteBuffer.wrap(memoryBuffer, 0x00003000, 4)
                   .order(ByteOrder.LITTLE_ENDIAN)
                   .putFloat(99.5f);
@@ -66,13 +64,15 @@ public class JLMemoryDebugService implements Runnable {
 
         @Override
         public void run() {
-            try (BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            try (InputStream in = socket.getInputStream();
                  OutputStream out = socket.getOutputStream()) {
 
+                BufferedReader reader = new BufferedReader(new InputStreamReader(in, "UTF-8"));
+                
                 // 1. Handshake WebSocket
                 String line;
                 String webSocketKey = "";
-                while ((line = in.readLine()) != null && !line.isEmpty()) {
+                while ((line = reader.readLine()) != null && !line.isEmpty()) {
                     if (line.startsWith("Sec-WebSocket-Key:")) {
                         webSocketKey = line.split(":")[1].trim();
                     }
@@ -96,11 +96,16 @@ public class JLMemoryDebugService implements Runnable {
                 System.out.println("Frontend connected!");
 
                 // 2. Loop Baca Frame WebSocket
-                while (true) {
-                    String payload = readWebSocketFrame(socket.getInputStream());
+                while (!socket.isClosed()) {
+                    String payload = readWebSocketFrame(in);
                     if (payload == null) break;
 
-                    handleCommand(payload, out);
+                    try {
+                        handleCommand(payload, out);
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                        sendJsonResponse(out, "error", "Internal Engine Error: " + e.getMessage());
+                    }
                 }
 
             } catch (Exception e) {
@@ -114,7 +119,7 @@ public class JLMemoryDebugService implements Runnable {
             if ("search".equals(type)) {
                 String value = extractJsonValue(jsonPayload, "value");
                 String dataType = extractJsonValue(jsonPayload, "dataType");
-                long start = parseHex(extractJsonValue(jsonPayload, "startAddr"), 0x00001000L);
+                long start = parseHex(extractJsonValue(jsonPayload, "startAddr"), 0x00000000L);
                 long end = parseHex(extractJsonValue(jsonPayload, "endAddr"), 0x03FFFFFFL);
 
                 if (end >= MEMORY_SIZE) end = MEMORY_SIZE - 1;
@@ -157,11 +162,10 @@ public class JLMemoryDebugService implements Runnable {
             }
         }
 
-        // --- CORE MEMORY OPERATIONS (LITTLE ENDIAN) ---
-
         private List<String> searchMemory(String searchValue, String dataType, long start, long end) {
             List<String> results = new ArrayList<>();
             searchValue = searchValue.trim();
+            if (searchValue.isEmpty()) return results;
 
             try {
                 if ("byte".equals(dataType)) {
@@ -206,9 +210,7 @@ public class JLMemoryDebugService implements Runnable {
                         }
                     }
                 }
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+            } catch (Exception ignored) {}
 
             return results;
         }
@@ -250,9 +252,7 @@ public class JLMemoryDebugService implements Runnable {
                               .order(ByteOrder.LITTLE_ENDIAN)
                               .putFloat(Float.parseFloat(valueStr.trim()));
                 }
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+            } catch (Exception ignored) {}
         }
 
         private String readMemoryValue(int addr, String dataType) {
@@ -275,23 +275,29 @@ public class JLMemoryDebugService implements Runnable {
             return "0";
         }
 
-        // --- UTILITY & JSON PARSER MANUAL ---
+        // --- JSON PARSER ROBUST & TOLERAN ---
 
         private String extractJsonValue(String json, String key) {
-            String pattern = "\"" + key + "\":\"";
-            int start = json.indexOf(pattern);
-            if (start == -1) {
-                pattern = "\"" + key + "\":";
-                start = json.indexOf(pattern);
-                if (start == -1) return "";
-                start += pattern.length();
-                int end = json.indexOf(",", start);
-                if (end == -1) end = json.indexOf("}", start);
-                return json.substring(start, end).replace("\"", "").trim();
+            String patternWithQuotes = "\"" + key + "\":\"";
+            int start = json.indexOf(patternWithQuotes);
+            if (start != -1) {
+                start += patternWithQuotes.length();
+                int end = json.indexOf("\"", start);
+                if (end != -1) return json.substring(start, end);
             }
-            start += pattern.length();
-            int end = json.indexOf("\"", start);
-            return json.substring(start, end);
+
+            String patternNoQuotes = "\"" + key + "\":";
+            start = json.indexOf(patternNoQuotes);
+            if (start != -1) {
+                start += patternNoQuotes.length();
+                int endComma = json.indexOf(",", start);
+                int endBrace = json.indexOf("}", start);
+                int end = (endComma != -1 && endComma < endBrace) ? endComma : endBrace;
+                if (end != -1) {
+                    return json.substring(start, end).replace("\"", "").trim();
+                }
+            }
+            return "";
         }
 
         private List<String> extractJsonArray(String json, String key) {
@@ -333,8 +339,9 @@ public class JLMemoryDebugService implements Runnable {
         }
 
         private String padHex(String hex) {
-            while (hex.length() < 8) hex = "0" + hex;
-            return hex.toUpperCase();
+            StringBuilder sb = new StringBuilder(hex.toUpperCase());
+            while (sb.length() < 8) sb.insert(0, "0");
+            return sb.toString();
         }
 
         private void sendJsonResponse(OutputStream out, String type, String dataPayload) throws Exception {
@@ -344,41 +351,57 @@ public class JLMemoryDebugService implements Runnable {
             byte[] payloadBytes = json.getBytes("UTF-8");
             int length = payloadBytes.length;
 
-            out.write(0x81);
+            out.write(0x81); // Text Frame
             if (length <= 125) {
                 out.write(length);
             } else if (length <= 65535) {
                 out.write(126);
                 out.write((length >> 8) & 0xFF);
                 out.write(length & 0xFF);
+            } else {
+                out.write(127);
+                for (int i = 7; i >= 0; i--) {
+                    out.write((int) ((length >> (i * 8)) & 0xFF));
+                }
             }
             out.write(payloadBytes);
             out.flush();
         }
 
-        private String readWebSocketFrame(java.io.InputStream in) throws Exception {
+        private String readWebSocketFrame(InputStream in) throws Exception {
             int b1 = in.read();
             if (b1 == -1) return null;
             int b2 = in.read();
+            if (b2 == -1) return null;
 
             boolean masked = (b2 & 0x80) != 0;
-            int payloadLength = b2 & 0x7F;
+            long payloadLength = b2 & 0x7F;
 
             if (payloadLength == 126) {
-                payloadLength = (in.read() << 8) | in.read();
+                int byte1 = in.read();
+                int byte2 = in.read();
+                if (byte1 == -1 || byte2 == -1) return null;
+                payloadLength = (byte1 << 8) | byte2;
             } else if (payloadLength == 127) {
-                return null; 
+                long len = 0;
+                for (int i = 0; i < 8; i++) {
+                    int b = in.read();
+                    if (b == -1) return null;
+                    len = (len << 8) | b;
+                }
+                payloadLength = len;
             }
 
             byte[] key = new byte[4];
             if (masked) {
-                in.read(key, 0, 4);
+                int readKey = in.read(key, 0, 4);
+                if (readKey < 4) return null;
             }
 
-            byte[] payload = new byte[payloadLength];
+            byte[] payload = new byte[(int) payloadLength];
             int totalRead = 0;
             while (totalRead < payloadLength) {
-                int read = in.read(payload, totalRead, payloadLength - totalRead);
+                int read = in.read(payload, totalRead, (int) payloadLength - totalRead);
                 if (read == -1) break;
                 totalRead += read;
             }
