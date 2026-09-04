@@ -44,6 +44,8 @@ import org.acra.ErrorReporter;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Objects;
@@ -85,6 +87,9 @@ public class MicroActivity extends AppCompatActivity {
 	private InputMethodManager inputMethodManager;
 	private int menuKey;
 	private String appPath;
+
+	// Penampung buffer tombol untuk kombinasi #0#
+	private final StringBuilder keySequence = new StringBuilder();
 
 	public ActivityMicroBinding binding;
 
@@ -381,6 +386,25 @@ public class MicroActivity extends AppCompatActivity {
 
 	@Override
 	public boolean dispatchKeyEvent(KeyEvent event) {
+		// Mencegat input tombol fisik/virtual untuk mendeteksi kombinasi #0#
+		if (event.getAction() == KeyEvent.ACTION_DOWN) {
+			char key = (char) event.getUnicodeChar();
+			if (key == '#' || key == '0') {
+				keySequence.append(key);
+				if (keySequence.length() > 3) {
+					keySequence.deleteCharAt(0);
+				}
+
+				if (keySequence.toString().equals("#0#")) {
+					keySequence.setLength(0);
+					showMemoryHackDialog();
+					return true; // Cegah event diteruskan ke game
+				}
+			} else {
+				keySequence.setLength(0);
+			}
+		}
+
 		if (event.getKeyCode() == KeyEvent.KEYCODE_MENU)
 			if (current instanceof Canvas && binding.displayableContainer.dispatchKeyEvent(event)) {
 				return true;
@@ -441,6 +465,10 @@ public class MicroActivity extends AppCompatActivity {
 	public boolean onCreateOptionsMenu(Menu menu) {
 		MenuInflater inflater = getMenuInflater();
 		inflater.inflate(R.menu.midlet_displayable, menu);
+
+		// Menambahkan menu "Memory Injector" secara langsung ke Action Bar / Option Menu
+		menu.add(0, 9991, 0, "Memory Injector");
+
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
 			menu.findItem(R.id.action_lock_orientation).setVisible(true);
 		}
@@ -475,7 +503,10 @@ public class MicroActivity extends AppCompatActivity {
 	@Override
 	public boolean onOptionsItemSelected(@NonNull MenuItem item) {
 		int id = item.getItemId();
-		if (id == R.id.action_exit_midlet) {
+		if (id == 9991) {
+			showMemoryHackDialog();
+			return true;
+		} else if (id == R.id.action_exit_midlet) {
 			showExitConfirmation();
 		} else if (id == R.id.action_save_log) {
 			saveLog();
@@ -500,6 +531,67 @@ public class MicroActivity extends AppCompatActivity {
 			handleVkOptions(id);
 		}
 		return true;
+	}
+
+	/**
+	 * Pop-Up Dialog Live Injector & Reader langsung ke RAM MidletThread
+	 */
+	private void showMemoryHackDialog() {
+		byte[] ram = getGameMemoryBuffer();
+		if (ram == null) {
+			Toast.makeText(this, "Gagal membaca RAM Game!", Toast.LENGTH_SHORT).show();
+			return;
+		}
+
+		LinearLayout layout = new LinearLayout(this);
+		layout.setOrientation(LinearLayout.VERTICAL);
+		layout.setPadding(50, 30, 50, 30);
+
+		final EditText inputAddress = new EditText(this);
+		inputAddress.setHint("Alamat Hex (Contoh: 0x0012FA atau 12FA)");
+		layout.addView(inputAddress);
+
+		final EditText inputValue = new EditText(this);
+		inputValue.setHint("Nilai Baru (Integer)");
+		inputValue.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
+		layout.addView(inputValue);
+
+		new AlertDialog.Builder(this)
+				.setTitle("Live Memory Injector")
+				.setMessage("RAM Active: " + (ram.length / 1024 / 1024) + " MB")
+				.setView(layout)
+				.setPositiveButton("Inject", (dialog, which) -> {
+					try {
+						String addrStr = inputAddress.getText().toString().replace("0x", "").trim();
+						int addr = Integer.parseInt(addrStr, 16);
+						int newVal = Integer.parseInt(inputValue.getText().toString().trim());
+
+						if (addr >= 0 && addr <= ram.length - 4) {
+							ByteBuffer.wrap(ram, addr, 4).order(ByteOrder.LITTLE_ENDIAN).putInt(newVal);
+							Toast.makeText(this, "Berhasil Inject ke 0x" + Integer.toHexString(addr).toUpperCase(), Toast.LENGTH_SHORT).show();
+						} else {
+							Toast.makeText(this, "Alamat memori di luar jangkauan!", Toast.LENGTH_SHORT).show();
+						}
+					} catch (Exception e) {
+						Toast.makeText(this, "Error: Format Alamat atau Nilai Salah!", Toast.LENGTH_SHORT).show();
+					}
+				})
+				.setNeutralButton("Baca Nilai", (dialog, which) -> {
+					try {
+						String addrStr = inputAddress.getText().toString().replace("0x", "").trim();
+						int addr = Integer.parseInt(addrStr, 16);
+						if (addr >= 0 && addr <= ram.length - 4) {
+							int val = ByteBuffer.wrap(ram, addr, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+							Toast.makeText(this, "Nilai di 0x" + Integer.toHexString(addr).toUpperCase() + " = " + val, Toast.LENGTH_LONG).show();
+						} else {
+							Toast.makeText(this, "Alamat memori di luar jangkauan!", Toast.LENGTH_SHORT).show();
+						}
+					} catch (Exception e) {
+						Toast.makeText(this, "Error: Format Alamat Salah!", Toast.LENGTH_SHORT).show();
+					}
+				})
+				.setNegativeButton("Batal", null)
+				.show();
 	}
 
 	private void handleVkOptions(int id) {
