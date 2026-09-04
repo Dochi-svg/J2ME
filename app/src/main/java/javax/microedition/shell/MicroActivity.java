@@ -1,22 +1,3 @@
-/*
- * Copyright 2015-2016 Nickolay Savchenko
- * Copyright 2017-2018 Nikita Shakarun
- * Copyright 2019-2022 Yury Kharchenko
- * Copyright 2022-2024 Arman Jussupgaliyev
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package javax.microedition.shell;
 
 import static ru.playsoftware.j2meloader.util.Constants.*;
@@ -82,6 +63,7 @@ import javax.microedition.util.ContextHolder;
 import io.reactivex.SingleObserver;
 import io.reactivex.disposables.Disposable;
 import ru.playsoftware.j2meloader.BuildConfig;
+import ru.playsoftware.j2meloader.JLMemoryDebugService;
 import ru.playsoftware.j2meloader.R;
 import ru.playsoftware.j2meloader.config.Config;
 import ru.playsoftware.j2meloader.databinding.ActivityMicroBinding;
@@ -263,10 +245,33 @@ public class MicroActivity extends AppCompatActivity {
 		if (size == 0) {
 			throw new Exception("No MIDlets found");
 		} else if (size == 1) {
-			MidletThread.create(microLoader, midletsClassArray[0]);
+			startAndAttachDebug(midletsClassArray[0]);
 		} else {
 			showMidletDialog(midletsNameArray, midletsClassArray);
 		}
+	}
+
+	private void startAndAttachDebug(String className) {
+		MidletThread.create(microLoader, className);
+
+		byte[] gameMemoryBuffer = getGameMemoryBuffer();
+		JLMemoryDebugService debugService = JLMemoryDebugService.getInstance();
+		if (debugService != null) {
+			debugService.setVMMemory(gameMemoryBuffer);
+		}
+	}
+
+	private byte[] getGameMemoryBuffer() {
+		try {
+			java.lang.reflect.Field field = MidletThread.class.getDeclaredField("ram");
+			field.setAccessible(true);
+			Object ramObj = field.get(null);
+			if (ramObj instanceof byte[]) {
+				return (byte[]) ramObj;
+			}
+		} catch (Throwable ignored) {
+		}
+		return new byte[16 * 1024 * 1024];
 	}
 
 	private void showMidletDialog(String[] names, final String[] classes) {
@@ -282,7 +287,7 @@ public class MicroActivity extends AppCompatActivity {
 					}
 					sb.append("Begin app: ").append(names[n]).append(", ").append(clazz);
 					errorReporter.putCustomData(Constants.KEY_APPCENTER_ATTACHMENT, sb.toString());
-					MidletThread.create(microLoader, clazz);
+					startAndAttachDebug(clazz);
 					MidletThread.resumeApp();
 				})
 				.setOnCancelListener(d -> {
@@ -430,7 +435,6 @@ public class MicroActivity extends AppCompatActivity {
 
 	@Override
 	public void onBackPressed() {
-		// Intentionally overridden by empty due to support for back-key remapping.
 	}
 
 	@Override
