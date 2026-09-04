@@ -13,53 +13,69 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 
+/**
+ * WebSocket-based Memory Debugger Server untuk J2ME Games
+ * Mengakses memori VM game yang sedang berjalan (bukan dummy memory)
+ */
 public class JLMemoryDebugService implements Runnable {
 
-    // Memori 64 MB (0x04000000 Byte)
-    private static final int MEMORY_SIZE = 0x04000000; 
-    private static final byte[] memoryBuffer = new byte[MEMORY_SIZE];
     private final int port;
+    private volatile byte[] vmMemory;
+    private static JLMemoryDebugService instance;
 
     public JLMemoryDebugService(int port) {
         this.port = port;
+        this.vmMemory = null;
+        instance = this;
+    }
+
+    /**
+     * Singleton instance untuk akses global
+     */
+    public static JLMemoryDebugService getInstance() {
+        return instance;
+    }
+
+    /**
+     * Set referensi ke memori VM dari game yang sedang berjalan
+     */
+    public void setVMMemory(byte[] memory) {
+        this.vmMemory = memory;
+        if (memory != null) {
+            System.out.println("[DEBUG] VM Memory set: " + memory.length + " bytes");
+        }
+    }
+
+    /**
+     * Get memori VM yang sedang aktif
+     */
+    public byte[] getVMMemory() {
+        return vmMemory;
     }
 
     @Override
     public void run() {
-        initDummyMemory();
-
-        System.out.println("=== J2ME Memory Debugger Server (64MB Little-Endian) ===");
+        System.out.println("=== J2ME Memory Debugger Server ===");
         System.out.println("Listening on ws://localhost:" + port);
+        System.out.println("Waiting for game to start...");
 
         try (ServerSocket serverSocket = new ServerSocket(port)) {
             while (true) {
                 Socket clientSocket = serverSocket.accept();
-                new Thread(new ClientHandler(clientSocket), "J2ME-DebugClient").start();
+                new Thread(new ClientHandler(clientSocket, this), "J2ME-DebugClient").start();
             }
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-    private static void initDummyMemory() {
-        ByteBuffer.wrap(memoryBuffer, 0x00000010, 4)
-                  .order(ByteOrder.LITTLE_ENDIAN)
-                  .putInt(50); // Test angka kecil di offset awal
-
-        ByteBuffer.wrap(memoryBuffer, 0x00002000, 4)
-                  .order(ByteOrder.LITTLE_ENDIAN)
-                  .putInt(100);
-
-        ByteBuffer.wrap(memoryBuffer, 0x00003000, 4)
-                  .order(ByteOrder.LITTLE_ENDIAN)
-                  .putFloat(99.5f);
-    }
-
     private static class ClientHandler implements Runnable {
         private final Socket socket;
+        private final JLMemoryDebugService debugService;
 
-        public ClientHandler(Socket socket) {
+        public ClientHandler(Socket socket, JLMemoryDebugService debugService) {
             this.socket = socket;
+            this.debugService = debugService;
         }
 
         @Override
@@ -69,7 +85,7 @@ public class JLMemoryDebugService implements Runnable {
 
                 BufferedReader reader = new BufferedReader(new InputStreamReader(in, "UTF-8"));
                 
-                // 1. Handshake WebSocket
+                // WebSocket Handshake
                 String line;
                 String webSocketKey = "";
                 while ((line = reader.readLine()) != null && !line.isEmpty()) {
@@ -93,9 +109,9 @@ public class JLMemoryDebugService implements Runnable {
                 out.write(response.getBytes("UTF-8"));
                 out.flush();
 
-                System.out.println("Frontend connected!");
+                System.out.println("Frontend connected to Memory Debugger!");
 
-                // 2. Loop Baca Frame WebSocket
+                // WebSocket Loop
                 while (!socket.isClosed()) {
                     String payload = readWebSocketFrame(in);
                     if (payload == null) break;
@@ -104,16 +120,22 @@ public class JLMemoryDebugService implements Runnable {
                         handleCommand(payload, out);
                     } catch (Exception e) {
                         e.printStackTrace();
-                        sendJsonResponse(out, "error", "Internal Engine Error: " + e.getMessage());
+                        sendJsonResponse(out, "error", "Internal Error: " + e.getMessage());
                     }
                 }
 
             } catch (Exception e) {
-                System.out.println("Client disconnected.");
+                System.out.println("Debugger client disconnected.");
             }
         }
 
         private void handleCommand(String jsonPayload, OutputStream out) throws Exception {
+            byte[] memory = debugService.getVMMemory();
+            if (memory == null) {
+                sendJsonResponse(out, "error", "No game running. VM memory not initialized.");
+                return;
+            }
+
             String type = extractJsonValue(jsonPayload, "type");
             
             if ("search".equals(type)) {
@@ -122,18 +144,23 @@ public class JLMemoryDebugService implements Runnable {
                 long start = parseHex(extractJsonValue(jsonPayload, "startAddr"), 0x00000000L);
                 long end = parseHex(extractJsonValue(jsonPayload, "endAddr"), 0x03FFFFFFL);
 
-                if (end >= MEMORY_SIZE) end = MEMORY_SIZE - 1;
+                if (end >= memory.length) end = memory.length - 1;
 
-                List<String> results = searchMemory(value, dataType, start, end);
-                sendJsonResponse(out, "search_result", "{\"found\":" + results.size() + ",\"results\":" + toJsonArray(results) + "}");
+                List<String> results = searchMemory(memory, value, dataType, start, end);
+                sendJsonResponse(out, "search_result", 
+                    "{\"found\":" + results.size() + ",\"results\":" + toJsonArray(results) + "}");
 
-            } else if ("nextSearch".equals(type)) {
-                String value = extractJsonValue(jsonPayload, "value");
+            } else if ("read".equals(type)) {
+                String addressStr = extractJsonValue(jsonPayload, "address");
                 String dataType = extractJsonValue(jsonPayload, "dataType");
-                List<String> prevResults = extractJsonArray(jsonPayload, "previousResults");
 
-                List<String> filtered = filterMemory(value, dataType, prevResults);
-                sendJsonResponse(out, "search_result", "{\"found\":" + filtered.size() + ",\"results\":" + toJsonArray(filtered) + "}");
+                long addr = parseHex(addressStr, -1);
+                if (addr >= 0 && addr < memory.length) {
+                    String valStr = readMemoryValue(memory, (int) addr, dataType);
+                    sendJsonResponse(out, "value", valStr);
+                } else {
+                    sendJsonResponse(out, "error", "Address out of bounds: 0x" + Long.toHexString(addr));
+                }
 
             } else if ("write".equals(type)) {
                 String addressStr = extractJsonValue(jsonPayload, "address");
@@ -141,28 +168,21 @@ public class JLMemoryDebugService implements Runnable {
                 String dataType = extractJsonValue(jsonPayload, "dataType");
 
                 long addr = parseHex(addressStr, -1);
-                if (addr >= 0 && addr < MEMORY_SIZE) {
-                    writeMemory((int) addr, value, dataType);
-                    sendJsonResponse(out, "ok", "Injected " + value + " to " + addressStr);
+                if (addr >= 0 && addr < memory.length) {
+                    writeMemory(memory, (int) addr, value, dataType);
+                    sendJsonResponse(out, "ok", "Injected " + value + " to 0x" + Long.toHexString(addr));
                 } else {
-                    sendJsonResponse(out, "error", "Invalid Address");
+                    sendJsonResponse(out, "error", "Invalid address: 0x" + Long.toHexString(addr));
                 }
 
-            } else if ("read".equals(type)) {
-                String addressStr = extractJsonValue(jsonPayload, "address");
-                String dataType = extractJsonValue(jsonPayload, "dataType");
-
-                long addr = parseHex(addressStr, -1);
-                if (addr >= 0 && addr < MEMORY_SIZE) {
-                    String valStr = readMemoryValue((int) addr, dataType);
-                    sendJsonResponse(out, "value", valStr);
-                } else {
-                    sendJsonResponse(out, "error", "Read Failed");
-                }
+            } else if ("info".equals(type)) {
+                long size = memory.length;
+                sendJsonResponse(out, "info", 
+                    "{\"memory_size\":" + size + ",\"memory_size_mb\":" + (size / 1024 / 1024) + "}");
             }
         }
 
-        private List<String> searchMemory(String searchValue, String dataType, long start, long end) {
+        private List<String> searchMemory(byte[] memory, String searchValue, String dataType, long start, long end) {
             List<String> results = new ArrayList<>();
             searchValue = searchValue.trim();
             if (searchValue.isEmpty()) return results;
@@ -170,43 +190,29 @@ public class JLMemoryDebugService implements Runnable {
             try {
                 if ("byte".equals(dataType)) {
                     byte target = (byte) Integer.parseInt(searchValue);
-                    for (long i = start; i <= end; i++) {
-                        if (memoryBuffer[(int) i] == target) {
+                    for (long i = start; i <= end && results.size() < 500; i++) {
+                        if (memory[(int) i] == target) {
                             results.add("0x" + padHex(Long.toHexString(i)));
-                            if (results.size() >= 500) break;
                         }
                     }
                 } else if ("int".equals(dataType)) {
                     int target = Integer.parseInt(searchValue);
-                    for (long i = start; i <= end - 3; i++) {
-                        int val = ByteBuffer.wrap(memoryBuffer, (int) i, 4)
+                    for (long i = start; i <= end - 3 && results.size() < 500; i++) {
+                        int val = ByteBuffer.wrap(memory, (int) i, 4)
                                             .order(ByteOrder.LITTLE_ENDIAN)
                                             .getInt();
                         if (val == target) {
                             results.add("0x" + padHex(Long.toHexString(i)));
-                            if (results.size() >= 500) break;
-                        }
-                    }
-                } else if ("long".equals(dataType)) {
-                    long target = Long.parseLong(searchValue);
-                    for (long i = start; i <= end - 7; i++) {
-                        long val = ByteBuffer.wrap(memoryBuffer, (int) i, 8)
-                                             .order(ByteOrder.LITTLE_ENDIAN)
-                                             .getLong();
-                        if (val == target) {
-                            results.add("0x" + padHex(Long.toHexString(i)));
-                            if (results.size() >= 500) break;
                         }
                     }
                 } else if ("float".equals(dataType)) {
                     float target = Float.parseFloat(searchValue);
-                    for (long i = start; i <= end - 3; i++) {
-                        float val = ByteBuffer.wrap(memoryBuffer, (int) i, 4)
+                    for (long i = start; i <= end - 3 && results.size() < 500; i++) {
+                        float val = ByteBuffer.wrap(memory, (int) i, 4)
                                               .order(ByteOrder.LITTLE_ENDIAN)
                                               .getFloat();
                         if (Math.abs(val - target) < 0.0001f) {
                             results.add("0x" + padHex(Long.toHexString(i)));
-                            if (results.size() >= 500) break;
                         }
                     }
                 }
@@ -215,58 +221,31 @@ public class JLMemoryDebugService implements Runnable {
             return results;
         }
 
-        private List<String> filterMemory(String searchValue, String dataType, List<String> addresses) {
-            List<String> filtered = new ArrayList<>();
-            for (String addrStr : addresses) {
-                long addr = parseHex(addrStr, -1);
-                if (addr < 0 || addr >= MEMORY_SIZE) continue;
-
-                String currentVal = readMemoryValue((int) addr, dataType);
-                if ("float".equals(dataType)) {
-                    try {
-                        float v1 = Float.parseFloat(currentVal);
-                        float v2 = Float.parseFloat(searchValue);
-                        if (Math.abs(v1 - v2) < 0.0001f) filtered.add(addrStr);
-                    } catch (Exception ignored) {}
-                } else if (currentVal.equals(searchValue.trim())) {
-                    filtered.add(addrStr);
-                }
-            }
-            return filtered;
-        }
-
-        private void writeMemory(int addr, String valueStr, String dataType) {
+        private void writeMemory(byte[] memory, int addr, String valueStr, String dataType) {
             try {
                 if ("byte".equals(dataType)) {
-                    memoryBuffer[addr] = (byte) Integer.parseInt(valueStr.trim());
+                    memory[addr] = (byte) Integer.parseInt(valueStr.trim());
                 } else if ("int".equals(dataType)) {
-                    ByteBuffer.wrap(memoryBuffer, addr, 4)
+                    ByteBuffer.wrap(memory, addr, 4)
                               .order(ByteOrder.LITTLE_ENDIAN)
                               .putInt(Integer.parseInt(valueStr.trim()));
-                } else if ("long".equals(dataType)) {
-                    ByteBuffer.wrap(memoryBuffer, addr, 8)
-                              .order(ByteOrder.LITTLE_ENDIAN)
-                              .putLong(Long.parseLong(valueStr.trim()));
                 } else if ("float".equals(dataType)) {
-                    ByteBuffer.wrap(memoryBuffer, addr, 4)
+                    ByteBuffer.wrap(memory, addr, 4)
                               .order(ByteOrder.LITTLE_ENDIAN)
                               .putFloat(Float.parseFloat(valueStr.trim()));
                 }
             } catch (Exception ignored) {}
         }
 
-        private String readMemoryValue(int addr, String dataType) {
+        private String readMemoryValue(byte[] memory, int addr, String dataType) {
             try {
                 if ("byte".equals(dataType)) {
-                    return String.valueOf(memoryBuffer[addr]);
+                    return String.valueOf(memory[addr]);
                 } else if ("int".equals(dataType)) {
-                    return String.valueOf(ByteBuffer.wrap(memoryBuffer, addr, 4)
+                    return String.valueOf(ByteBuffer.wrap(memory, addr, 4)
                             .order(ByteOrder.LITTLE_ENDIAN).getInt());
-                } else if ("long".equals(dataType)) {
-                    return String.valueOf(ByteBuffer.wrap(memoryBuffer, addr, 8)
-                            .order(ByteOrder.LITTLE_ENDIAN).getLong());
                 } else if ("float".equals(dataType)) {
-                    return String.valueOf(ByteBuffer.wrap(memoryBuffer, addr, 4)
+                    return String.valueOf(ByteBuffer.wrap(memory, addr, 4)
                             .order(ByteOrder.LITTLE_ENDIAN).getFloat());
                 }
             } catch (Exception e) {
@@ -274,8 +253,6 @@ public class JLMemoryDebugService implements Runnable {
             }
             return "0";
         }
-
-        // --- JSON PARSER ROBUST & TOLERAN ---
 
         private String extractJsonValue(String json, String key) {
             String patternWithQuotes = "\"" + key + "\":\"";
@@ -298,24 +275,6 @@ public class JLMemoryDebugService implements Runnable {
                 }
             }
             return "";
-        }
-
-        private List<String> extractJsonArray(String json, String key) {
-            List<String> list = new ArrayList<>();
-            String pattern = "\"" + key + "\":[";
-            int start = json.indexOf(pattern);
-            if (start == -1) return list;
-            start += pattern.length();
-            int end = json.indexOf("]", start);
-            if (end == -1) return list;
-
-            String arrayContent = json.substring(start, end);
-            String[] items = arrayContent.split(",");
-            for (String item : items) {
-                String cleaned = item.replace("\"", "").trim();
-                if (!cleaned.isEmpty()) list.add(cleaned);
-            }
-            return list;
         }
 
         private String toJsonArray(List<String> list) {
@@ -351,7 +310,7 @@ public class JLMemoryDebugService implements Runnable {
             byte[] payloadBytes = json.getBytes("UTF-8");
             int length = payloadBytes.length;
 
-            out.write(0x81); // Text Frame
+            out.write(0x81);
             if (length <= 125) {
                 out.write(length);
             } else if (length <= 65535) {
