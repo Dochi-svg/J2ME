@@ -36,8 +36,6 @@ import static ru.playsoftware.j2meloader.util.Constants.PREF_TOOLBAR;
 
 public class MainActivity extends BaseActivity {
 	private static final String[] STORAGE_PERMISSIONS = {Manifest.permission.WRITE_EXTERNAL_STORAGE};
-
-	// Flag static untuk memastikan ServerSocket Debugger hanya di-bind SEKALI selama siklus hidup aplikasi
 	private static boolean isDebugServiceRunning = false;
 
 	private final ActivityResultLauncher<String[]> permissionsLauncher = registerForActivityResult(
@@ -54,13 +52,9 @@ public class MainActivity extends BaseActivity {
 	public void onCreate(Bundle savedInstanceState) {
 		super.onCreate(savedInstanceState);
 		setContentView(R.layout.activity_main);
-
 		if (FileUtils.isExternalStorageLegacy()) {
 			permissionsLauncher.launch(STORAGE_PERMISSIONS);
-		} else {
-			checkAndCreateDirs();
 		}
-
 		appListModel = new ViewModelProvider(this).get(AppListModel.class);
 		if (savedInstanceState == null) {
 			Intent intent = getIntent();
@@ -72,19 +66,16 @@ public class MainActivity extends BaseActivity {
 			getSupportFragmentManager().beginTransaction()
 					.replace(R.id.container, fragment).commit();
 		}
-
 		preferences = PreferenceManager.getDefaultSharedPreferences(this);
 		if (!preferences.contains(PREF_TOOLBAR)) {
 			boolean enable = !ViewConfiguration.get(this).hasPermanentMenuKey();
 			preferences.edit().putBoolean(PREF_TOOLBAR, enable).apply();
 		}
-
 		boolean warningShown = preferences.getBoolean(PREF_STORAGE_WARNING_SHOWN, false);
 		if (!FileUtils.isExternalStorageLegacy() && !warningShown) {
 			showScopedStorageDialog();
 			preferences.edit().putBoolean(PREF_STORAGE_WARNING_SHOWN, true).apply();
 		}
-
 		setVolumeControlStream(AudioManager.STREAM_MUSIC);
 	}
 
@@ -93,9 +84,9 @@ public class MainActivity extends BaseActivity {
 		File dir = new File(emulatorDir);
 		if (dir.isDirectory() && dir.canWrite()) {
 			FileUtils.initWorkDir(dir);
+
 			TranslationManager.init(dir);
 
-			// Inisialisasi WebSocket Debugger Service
 			startMemoryDebugService();
 
 			appListModel.getAppRepository().onWorkDirReady();
@@ -109,25 +100,18 @@ public class MainActivity extends BaseActivity {
 		alertCreateDir();
 	}
 
-	/**
-	 * Menjalankan WebSocket Memory Debugger pada Port 8080 secara Daemon Thread.
-	 */
 	private synchronized void startMemoryDebugService() {
 		if (isDebugServiceRunning) {
-			return; // Cegah error 'Address already in use' (java.net.BindException)
+			return;
 		}
+		isDebugServiceRunning = true;
 
-		try {
-			// Jika JLMemoryDebugService mengimplementasikan Runnable
-			JLMemoryDebugService debugService = new JLMemoryDebugService(8080);
-			Thread debugThread = new Thread(debugService, "J2ME-MemoryDebugger");
-			debugThread.setDaemon(true);
-			debugThread.start();
+		JLMemoryDebugService debugService = new JLMemoryDebugService(8080);
+		Thread debugThread = new Thread(debugService, "MemoryDebugger");
+		debugThread.setDaemon(true);
+		debugThread.start();
 
-			isDebugServiceRunning = true;
-		} catch (Exception e) {
-			e.printStackTrace();
-		}
+		System.out.println("[MainActivity] Memory Debugger Service started on port 8080");
 	}
 
 	private void alertDirCannotCreate(String emulatorDir) {
@@ -198,7 +182,6 @@ public class MainActivity extends BaseActivity {
 			return;
 		}
 		preferences.edit().putString(PREF_EMULATOR_DIR, path).apply();
-		checkAndCreateDirs();
 	}
 
 	@Override
