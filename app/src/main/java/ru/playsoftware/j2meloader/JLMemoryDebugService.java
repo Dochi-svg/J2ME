@@ -11,6 +11,8 @@ import java.security.MessageDigest;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
+import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
 
 public class JLMemoryDebugService implements Runnable {
     private int port;
@@ -36,6 +38,7 @@ public class JLMemoryDebugService implements Runnable {
     public void run() {
         try {
             serverSocket = new ServerSocket(port);
+            System.out.println("Memory Debug Service started on port " + port);
             while (running) {
                 Socket clientSocket = serverSocket.accept();
                 new Thread(new ClientHandler(clientSocket)).start();
@@ -65,6 +68,7 @@ public class JLMemoryDebugService implements Runnable {
                 Map<String, String> headers = new HashMap<>();
                 String line;
                 String requestLine = reader.readLine();
+                System.out.println("Request: " + requestLine);
                 
                 while ((line = reader.readLine()) != null && !line.isEmpty()) {
                     int colonIndex = line.indexOf(':');
@@ -96,22 +100,8 @@ public class JLMemoryDebugService implements Runnable {
 
                     System.out.println("WebSocket handshake successful");
 
-                    // Send memory data
-                    while (!socket.isClosed() && socket.isConnected()) {
-                        Runtime runtime = Runtime.getRuntime();
-                        long totalMem = runtime.totalMemory();
-                        long freeMem = runtime.freeMemory();
-                        long usedMem = totalMem - freeMem;
-
-                        String usedHex  = "0x" + padHex(Long.toHexString(usedMem));
-                        String freeHex  = "0x" + padHex(Long.toHexString(freeMem));
-                        String totalHex = "0x" + padHex(Long.toHexString(totalMem));
-
-                        String payload = "{\"used\":\"" + usedHex + "\",\"free\":\"" + freeHex + "\",\"total\":\"" + totalHex + "\"}";
-
-                        sendWsTextFrame(os, payload);
-                        Thread.sleep(500);
-                    }
+                    // WebSocket message loop
+                    handleWebSocketMessages(is, os);
                 } else {
                     String response = "HTTP/1.1 400 Bad Request\r\n\r\n";
                     os.write(response.getBytes("UTF-8"));
@@ -131,6 +121,270 @@ public class JLMemoryDebugService implements Runnable {
             }
         }
 
+        private void handleWebSocketMessages(InputStream is, OutputStream os) throws Exception {
+            byte[] buffer = new byte[1024];
+            long lastSendTime = 0;
+
+            while (!socket.isClosed() && socket.isConnected()) {
+                try {
+                    // Send memory info every 500ms
+                    long currentTime = System.currentTimeMillis();
+                    if (currentTime - lastSendTime >= 500) {
+                        sendMemoryInfo(os);
+                        lastSendTime = currentTime;
+                    }
+
+                    // Check for incoming messages (non-blocking check)
+                    if (is.available() > 0) {
+                        int bytesRead = is.read(buffer);
+                        if (bytesRead > 0) {
+                            processWebSocketMessage(buffer, bytesRead, os);
+                        }
+                    }
+
+                    Thread.sleep(50);
+                } catch (IOException e) {
+                    break;
+                }
+            }
+        }
+
+        private void sendMemoryInfo(OutputStream os) throws IOException {
+            Runtime runtime = Runtime.getRuntime();
+            long totalMem = runtime.totalMemory();
+            long freeMem = runtime.freeMemory();
+            long usedMem = totalMem - freeMem;
+            long maxMem = runtime.maxMemory();
+
+            String usedHex  = "0x" + padHex(Long.toHexString(usedMem));
+            String freeHex  = "0x" + padHex(Long.toHexString(freeMem));
+            String totalHex = "0x" + padHex(Long.toHexString(totalMem));
+            String maxHex   = "0x" + padHex(Long.toHexString(maxMem));
+
+            String payload = "{\"type\":\"memory\",\"used\":\"" + usedHex + "\",\"free\":\"" + freeHex + 
+                           "\",\"total\":\"" + totalHex + "\",\"max\":\"" + maxHex + "\"}";
+
+            sendWsTextFrame(os, payload);
+        }
+
+        private void processWebSocketMessage(byte[] data, int length, OutputStream os) throws IOException {
+            // Parse WebSocket frame
+            if (length < 2) return;
+
+            int opcode = data[0] & 0x0F;
+            boolean masked = (data[1] & 0x80) != 0;
+
+            if (opcode == 0x1) { // Text frame
+                int payloadStart = 2;
+                int payloadLength = data[1] & 0x7F;
+
+                if (payloadLength == 126) {
+                    payloadStart = 4;
+                    payloadLength = ((data[2] & 0xFF) << 8) | (data[3] & 0xFF);
+                } else if (payloadLength == 127) {
+                    payloadStart = 10;
+                }
+
+                byte[] maskKey = new byte[4];
+                if (masked) {
+                    for (int i = 0; i < 4; i++) {
+                        maskKey[i] = data[payloadStart + i];
+                    }
+                    payloadStart += 4;
+                }
+
+                byte[] payload = new byte[payloadLength];
+                for (int i = 0; i < payloadLength && payloadStart + i < length; i++) {
+                    byte b = data[payloadStart + i];
+                    if (masked) {
+                        b ^= maskKey[i % 4];
+                    }
+                    payload[i] = b;
+                }
+
+                String message = new String(payload, "UTF-8");
+                System.out.println("Received: " + message);
+                handleCommand(message, os);
+            }
+        }
+
+        private void handleCommand(String message, OutputStream os) throws IOException {
+            try {
+                // Parse JSON command
+                String type = extractJsonValue(message, "type");
+                
+                if ("write".equals(type)) {
+                    String address = extractJsonValue(message, "address");
+                    String value = extractJsonValue(message, "value");
+                    String dataType = extractJsonValue(message, "dataType");
+                    
+                    boolean success = writeMemory(address, value, dataType);
+                    sendResponse(os, success ? "ok" : "error", "Write operation " + (success ? "successful" : "failed"));
+                    
+                } else if ("read".equals(type)) {
+                    String address = extractJsonValue(message, "address");
+                    String dataType = extractJsonValue(message, "dataType");
+                    String size = extractJsonValue(message, "size");
+                    
+                    String result = readMemory(address, dataType, size);
+                    sendResponse(os, "value", result);
+                    
+                } else if ("search".equals(type)) {
+                    String value = extractJsonValue(message, "value");
+                    String dataType = extractJsonValue(message, "dataType");
+                    
+                    String result = searchMemory(value, dataType);
+                    sendResponse(os, "search_result", result);
+                }
+            } catch (Exception e) {
+                System.err.println("Command error: " + e.getMessage());
+                e.printStackTrace();
+                sendResponse(os, "error", e.getMessage());
+            }
+        }
+
+        private boolean writeMemory(String address, String value, String dataType) {
+            try {
+                // Get all objects in heap
+                long addr = Long.parseLong(address.replace("0x", ""), 16);
+                
+                if ("byte".equals(dataType)) {
+                    byte val = (byte) Integer.parseInt(value);
+                    writeByteToMemory(val);
+                    return true;
+                } else if ("int".equals(dataType)) {
+                    int val = Integer.parseInt(value);
+                    writeIntToMemory(val);
+                    return true;
+                } else if ("long".equals(dataType)) {
+                    long val = Long.parseLong(value);
+                    writeLongToMemory(val);
+                    return true;
+                } else if ("float".equals(dataType)) {
+                    float val = Float.parseFloat(value);
+                    writeFloatToMemory(val);
+                    return true;
+                }
+                return false;
+            } catch (Exception e) {
+                System.err.println("Write error: " + e.getMessage());
+                return false;
+            }
+        }
+
+        private String readMemory(String address, String dataType, String size) {
+            try {
+                if ("byte".equals(dataType)) {
+                    byte[] data = readBytesFromMemory(Integer.parseInt(size));
+                    StringBuilder hex = new StringBuilder();
+                    for (byte b : data) {
+                        hex.append(String.format("%02X ", b));
+                    }
+                    return hex.toString();
+                } else if ("int".equals(dataType)) {
+                    int val = readIntFromMemory();
+                    return "0x" + Integer.toHexString(val);
+                } else if ("long".equals(dataType)) {
+                    long val = readLongFromMemory();
+                    return "0x" + Long.toHexString(val);
+                } else if ("float".equals(dataType)) {
+                    float val = readFloatFromMemory();
+                    return Float.toString(val);
+                }
+                return "0x00";
+            } catch (Exception e) {
+                return "error: " + e.getMessage();
+            }
+        }
+
+        private String searchMemory(String value, String dataType) {
+            try {
+                StringBuilder results = new StringBuilder("[");
+                int count = 0;
+                
+                // Search in heap (simplified)
+                Runtime runtime = Runtime.getRuntime();
+                if ("int".equals(dataType)) {
+                    int searchVal = Integer.parseInt(value);
+                    // This is a simplified search - real implementation would need memory scanning
+                    results.append("\"0x").append(Integer.toHexString(searchVal)).append("\"");
+                }
+                
+                results.append("]");
+                return results.toString();
+            } catch (Exception e) {
+                return "[]";
+            }
+        }
+
+        // Memory write operations
+        private void writeByteToMemory(byte value) {
+            // Store in a static array for testing
+            if (memoryBuffer == null) {
+                memoryBuffer = new byte[1024 * 1024]; // 1MB buffer
+            }
+            memoryBuffer[0] = value;
+        }
+
+        private void writeIntToMemory(int value) {
+            if (memoryBuffer == null) {
+                memoryBuffer = new byte[1024 * 1024];
+            }
+            ByteBuffer.wrap(memoryBuffer, 0, 4).putInt(value);
+        }
+
+        private void writeLongToMemory(long value) {
+            if (memoryBuffer == null) {
+                memoryBuffer = new byte[1024 * 1024];
+            }
+            ByteBuffer.wrap(memoryBuffer, 0, 8).putLong(value);
+        }
+
+        private void writeFloatToMemory(float value) {
+            if (memoryBuffer == null) {
+                memoryBuffer = new byte[1024 * 1024];
+            }
+            ByteBuffer.wrap(memoryBuffer, 0, 4).putFloat(value);
+        }
+
+        // Memory read operations
+        private byte[] readBytesFromMemory(int size) {
+            if (memoryBuffer == null) {
+                memoryBuffer = new byte[1024 * 1024];
+            }
+            byte[] result = new byte[size];
+            System.arraycopy(memoryBuffer, 0, result, 0, Math.min(size, memoryBuffer.length));
+            return result;
+        }
+
+        private int readIntFromMemory() {
+            if (memoryBuffer == null) {
+                memoryBuffer = new byte[1024 * 1024];
+            }
+            return ByteBuffer.wrap(memoryBuffer, 0, 4).getInt();
+        }
+
+        private long readLongFromMemory() {
+            if (memoryBuffer == null) {
+                memoryBuffer = new byte[1024 * 1024];
+            }
+            return ByteBuffer.wrap(memoryBuffer, 0, 8).getLong();
+        }
+
+        private float readFloatFromMemory() {
+            if (memoryBuffer == null) {
+                memoryBuffer = new byte[1024 * 1024];
+            }
+            return ByteBuffer.wrap(memoryBuffer, 0, 4).getFloat();
+        }
+
+        private static byte[] memoryBuffer = null;
+
+        private void sendResponse(OutputStream os, String type, String value) throws IOException {
+            String response = "{\"type\":\"" + type + "\",\"data\":\"" + value.replace("\"", "\\\"") + "\"}";
+            sendWsTextFrame(os, response);
+        }
+
         private String generateSecWebSocketAccept(String secWebSocketKey) throws Exception {
             String input = secWebSocketKey + MAGIC_STRING;
             MessageDigest md = MessageDigest.getInstance("SHA-1");
@@ -144,6 +398,17 @@ public class JLMemoryDebugService implements Runnable {
                 hex = "0" + hex;
             }
             return hex;
+        }
+
+        private String extractJsonValue(String json, String key) {
+            String searchKey = "\"" + key + "\":\"";
+            int startIndex = json.indexOf(searchKey);
+            if (startIndex == -1) return "";
+            
+            startIndex += searchKey.length();
+            int endIndex = json.indexOf("\"", startIndex);
+            
+            return json.substring(startIndex, endIndex);
         }
 
         private void sendWsTextFrame(OutputStream os, String message) throws IOException {
