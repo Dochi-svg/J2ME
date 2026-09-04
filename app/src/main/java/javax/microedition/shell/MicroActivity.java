@@ -48,7 +48,6 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.ArrayList;
-import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Objects;
 
@@ -552,7 +551,7 @@ public class MicroActivity extends AppCompatActivity {
 			return;
 		}
 
-		final List<Integer> results = new ArrayList<>();
+		final java.util.List<Integer> results = new ArrayList<>();
 		final LinearLayout root = new LinearLayout(this);
 		root.setOrientation(LinearLayout.VERTICAL);
 		root.setPadding(28, 18, 28, 8);
@@ -666,7 +665,7 @@ public class MicroActivity extends AppCompatActivity {
 			try {
 				int target = Integer.parseInt(valueInput.getText().toString().trim());
 				byte[] liveRam = MemoryEngine.getLiveRam();
-				List<Integer> filtered =
+				java.util.List<Integer> filtered =
 						MemoryEngine.nextScanInt(liveRam, results, target);
 				results.clear();
 				results.addAll(filtered);
