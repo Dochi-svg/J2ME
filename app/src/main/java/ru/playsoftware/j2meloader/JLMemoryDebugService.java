@@ -1,65 +1,59 @@
-package ru.playsoftware.j2meloader;
-
 import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.lang.reflect.Field;
-import java.nio.ByteBuffer;
 
-public class JLMemoryDebugService implements Runnable {
-    private int port;
-    private boolean running = true;
-    private ServerSocket serverSocket;
-    private static byte[] memoryBuffer = null;
+public class JLMemoryDebugService {
 
-    public JLMemoryDebugService(int port) {
-        this.port = port;
-        // Initialize memory buffer (64 MB default)
-        if (memoryBuffer == null) {
-            memoryBuffer = new byte[64 * 1024 * 1024];
-        }
-    }
+    private static final int PORT = 8080;
+    // Buffer memori tiruan/simulasi untuk runtime J2ME (16 MB)
+    private static final int MEMORY_SIZE = 0x01000000; 
+    private static final byte[] memoryBuffer = new byte[MEMORY_SIZE];
 
-    public void stopService() {
-        this.running = false;
-        try {
-            if (serverSocket != null && !serverSocket.isClosed()) {
-                serverSocket.close();
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
+    public static void main(String[] args) {
+        // Inisialisasi dummy data untuk testing
+        initDummyMemory();
 
-    @Override
-    public void run() {
-        try {
-            serverSocket = new ServerSocket(port);
-            System.out.println("Memory Debug Service started on port " + port);
-            System.out.println("Memory Buffer Size: " + (memoryBuffer.length / (1024 * 1024)) + " MB");
-            while (running) {
+        System.out.println("=== J2ME Memory Debugger Server (Little-Endian) ===");
+        System.out.println("Listening on ws://localhost:" + PORT);
+
+        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
+            while (true) {
                 Socket clientSocket = serverSocket.accept();
                 new Thread(new ClientHandler(clientSocket)).start();
             }
         } catch (Exception e) {
-            System.err.println("Server error: " + e.getMessage());
             e.printStackTrace();
         }
     }
 
-    private class ClientHandler implements Runnable {
-        private Socket socket;
-        private static final String MAGIC_STRING = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    private static void initDummyMemory() {
+        // Mengisi memori dengan angka dummy (Little-Endian)
+        // Menulis angka Int 100 di alamat 0x00002000
+        ByteBuffer.wrap(memoryBuffer, 0x00002000, 4)
+                  .order(ByteOrder.LITTLE_ENDIAN)
+                  .putInt(100);
+
+        // Menulis angka Int 100 di alamat 0x00002005 (unaligned test)
+        ByteBuffer.wrap(memoryBuffer, 0x00002005, 4)
+                  .order(ByteOrder.LITTLE_ENDIAN)
+                  .putInt(100);
+
+        // Menulis Float 99.5f di alamat 0x00003000
+        ByteBuffer.wrap(memoryBuffer, 0x00003000, 4)
+                  .order(ByteOrder.LITTLE_ENDIAN)
+                  .putFloat(99.5f);
+    }
+
+    private static class ClientHandler implements Runnable {
+        private final Socket socket;
 
         public ClientHandler(Socket socket) {
             this.socket = socket;
@@ -67,409 +61,333 @@ public class JLMemoryDebugService implements Runnable {
 
         @Override
         public void run() {
-            try {
-                InputStream is = socket.getInputStream();
-                OutputStream os = socket.getOutputStream();
-                BufferedReader reader = new BufferedReader(new InputStreamReader(is));
+            try (BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                 OutputStream out = socket.getOutputStream()) {
 
-                // Parse HTTP headers
-                Map<String, String> headers = new HashMap<>();
+                // 1. Handshake WebSocket
                 String line;
-                String requestLine = reader.readLine();
-                System.out.println("Request: " + requestLine);
-                
-                while ((line = reader.readLine()) != null && !line.isEmpty()) {
-                    int colonIndex = line.indexOf(':');
-                    if (colonIndex > 0) {
-                        String key = line.substring(0, colonIndex).trim();
-                        String value = line.substring(colonIndex + 1).trim();
-                        headers.put(key.toLowerCase(), value);
+                String webSocketKey = "";
+                while ((line = in.readLine()) != null && !line.isEmpty()) {
+                    if (line.startsWith("Sec-WebSocket-Key:")) {
+                        webSocketKey = line.split(":")[1].trim();
                     }
                 }
 
-                // Validate WebSocket upgrade request
-                String upgrade = headers.get("upgrade");
-                String connection = headers.get("connection");
-                String secWebSocketKey = headers.get("sec-websocket-key");
+                if (webSocketKey.isEmpty()) return;
 
-                if ("websocket".equalsIgnoreCase(upgrade) && 
-                    connection != null && connection.toLowerCase().contains("upgrade") && 
-                    secWebSocketKey != null) {
-                    
-                    // Calculate Sec-WebSocket-Accept
-                    String secWebSocketAccept = generateSecWebSocketAccept(secWebSocketKey);
-                    
-                    String response = "HTTP/1.1 101 Switching Protocols\r\n" +
-                                      "Upgrade: websocket\r\n" +
-                                      "Connection: Upgrade\r\n" +
-                                      "Sec-WebSocket-Accept: " + secWebSocketAccept + "\r\n\r\n";
-                    os.write(response.getBytes("UTF-8"));
-                    os.flush();
+                String acceptKey = Base64.getEncoder().encodeToString(
+                        MessageDigest.getInstance("SHA-1").digest(
+                                (webSocketKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").getBytes("UTF-8")
+                        )
+                );
 
-                    System.out.println("WebSocket handshake successful");
+                String response = "HTTP/1.1 101 Switching Protocols\r\n"
+                        + "Upgrade: websocket\r\n"
+                        + "Connection: Upgrade\r\n"
+                        + "Sec-WebSocket-Accept: " + acceptKey + "\r\n\r\n";
+                out.write(response.getBytes("UTF-8"));
+                out.flush();
 
-                    // WebSocket message loop
-                    handleWebSocketMessages(is, os);
+                System.out.println("Frontend connected!");
+
+                // 2. Loop Baca Frame WebSocket
+                while (true) {
+                    String payload = readWebSocketFrame(socket.getInputStream());
+                    if (payload == null) break;
+
+                    handleCommand(payload, out);
+                }
+
+            } catch (Exception e) {
+                System.out.println("Client disconnected.");
+            }
+        }
+
+        private void handleCommand(String jsonPayload, OutputStream out) throws Exception {
+            String type = extractJsonValue(jsonPayload, "type");
+            
+            if ("search".equals(type)) {
+                String value = extractJsonValue(jsonPayload, "value");
+                String dataType = extractJsonValue(jsonPayload, "dataType");
+                long start = parseHex(extractJsonValue(jsonPayload, "startAddr"), 0x00001000L);
+                long end = parseHex(extractJsonValue(jsonPayload, "endAddr"), 0x03FFFFFFL);
+
+                if (end >= MEMORY_SIZE) end = MEMORY_SIZE - 1;
+
+                List<String> results = searchMemory(value, dataType, start, end);
+                sendJsonResponse(out, "search_result", "{\"found\":" + results.size() + ",\"results\":" + toJsonArray(results) + "}");
+
+            } else if ("nextSearch".equals(type)) {
+                String value = extractJsonValue(jsonPayload, "value");
+                String dataType = extractJsonValue(jsonPayload, "dataType");
+                List<String> prevResults = extractJsonArray(jsonPayload, "previousResults");
+
+                List<String> filtered = filterMemory(value, dataType, prevResults);
+                sendJsonResponse(out, "search_result", "{\"found\":" + filtered.size() + ",\"results\":" + toJsonArray(filtered) + "}");
+
+            } else if ("write".equals(type)) {
+                String addressStr = extractJsonValue(jsonPayload, "address");
+                String value = extractJsonValue(jsonPayload, "value");
+                String dataType = extractJsonValue(jsonPayload, "dataType");
+
+                long addr = parseHex(addressStr, -1);
+                if (addr >= 0 && addr < MEMORY_SIZE) {
+                    writeMemory((int) addr, value, dataType);
+                    sendJsonResponse(out, "ok", "Injected " + value + " to " + addressStr);
                 } else {
-                    String response = "HTTP/1.1 400 Bad Request\r\n\r\n";
-                    os.write(response.getBytes("UTF-8"));
-                    os.flush();
-                    System.err.println("Invalid WebSocket request");
+                    sendJsonResponse(out, "error", "Invalid Address");
                 }
 
-            } catch (Exception e) {
-                System.err.println("Client handler error: " + e.getMessage());
-                e.printStackTrace();
-            } finally {
-                try {
-                    socket.close();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-        }
+            } else if ("read".equals(type)) {
+                String addressStr = extractJsonValue(jsonPayload, "address");
+                String dataType = extractJsonValue(jsonPayload, "dataType");
 
-        private void handleWebSocketMessages(InputStream is, OutputStream os) throws Exception {
-            byte[] buffer = new byte[4096];
-            long lastSendTime = 0;
-
-            while (!socket.isClosed() && socket.isConnected()) {
-                try {
-                    // Send memory info every 500ms
-                    long currentTime = System.currentTimeMillis();
-                    if (currentTime - lastSendTime >= 500) {
-                        sendMemoryInfo(os);
-                        lastSendTime = currentTime;
-                    }
-
-                    // Check for incoming messages (non-blocking check)
-                    if (is.available() > 0) {
-                        int bytesRead = is.read(buffer);
-                        if (bytesRead > 0) {
-                            processWebSocketMessage(buffer, bytesRead, os);
-                        }
-                    }
-
-                    Thread.sleep(50);
-                } catch (IOException e) {
-                    break;
+                long addr = parseHex(addressStr, -1);
+                if (addr >= 0 && addr < MEMORY_SIZE) {
+                    String valStr = readMemoryValue((int) addr, dataType);
+                    sendJsonResponse(out, "value", valStr);
+                } else {
+                    sendJsonResponse(out, "error", "Read Failed");
                 }
             }
         }
 
-        private void sendMemoryInfo(OutputStream os) throws IOException {
-            Runtime runtime = Runtime.getRuntime();
-            long totalMem = runtime.totalMemory();
-            long freeMem = runtime.freeMemory();
-            long usedMem = totalMem - freeMem;
-            long maxMem = runtime.maxMemory();
+        // --- CORE MEMORY OPERATIONS (LITTLE ENDIAN) ---
 
-            String usedHex  = "0x" + padHex(Long.toHexString(usedMem));
-            String freeHex  = "0x" + padHex(Long.toHexString(freeMem));
-            String totalHex = "0x" + padHex(Long.toHexString(totalMem));
-            String maxHex   = "0x" + padHex(Long.toHexString(maxMem));
+        private List<String> searchMemory(String searchValue, String dataType, long start, long end) {
+            List<String> results = new ArrayList<>();
+            searchValue = searchValue.trim();
 
-            String payload = "{\"type\":\"memory\",\"used\":\"" + usedHex + "\",\"free\":\"" + freeHex + 
-                           "\",\"total\":\"" + totalHex + "\",\"max\":\"" + maxHex + "\"}";
-
-            sendWsTextFrame(os, payload);
-        }
-
-        private void processWebSocketMessage(byte[] data, int length, OutputStream os) throws IOException {
-            // Parse WebSocket frame
-            if (length < 2) return;
-
-            int opcode = data[0] & 0x0F;
-            boolean masked = (data[1] & 0x80) != 0;
-
-            if (opcode == 0x1) { // Text frame
-                int payloadStart = 2;
-                int payloadLength = data[1] & 0x7F;
-
-                if (payloadLength == 126) {
-                    payloadStart = 4;
-                    payloadLength = ((data[2] & 0xFF) << 8) | (data[3] & 0xFF);
-                } else if (payloadLength == 127) {
-                    payloadStart = 10;
-                }
-
-                byte[] maskKey = new byte[4];
-                if (masked) {
-                    for (int i = 0; i < 4; i++) {
-                        maskKey[i] = data[payloadStart + i];
-                    }
-                    payloadStart += 4;
-                }
-
-                byte[] payload = new byte[payloadLength];
-                for (int i = 0; i < payloadLength && payloadStart + i < length; i++) {
-                    byte b = data[payloadStart + i];
-                    if (masked) {
-                        b ^= maskKey[i % 4];
-                    }
-                    payload[i] = b;
-                }
-
-                String message = new String(payload, "UTF-8");
-                System.out.println("Received: " + message);
-                handleCommand(message, os);
-            }
-        }
-
-        private void handleCommand(String message, OutputStream os) throws IOException {
             try {
-                // Parse JSON command
-                String type = extractJsonValue(message, "type");
-                
-                if ("write".equals(type)) {
-                    String address = extractJsonValue(message, "address");
-                    String value = extractJsonValue(message, "value");
-                    String dataType = extractJsonValue(message, "dataType");
-                    
-                    boolean success = writeMemory(address, value, dataType);
-                    sendResponse(os, success ? "ok" : "error", "Write operation " + (success ? "successful" : "failed"));
-                    
-                } else if ("read".equals(type)) {
-                    String address = extractJsonValue(message, "address");
-                    String dataType = extractJsonValue(message, "dataType");
-                    String size = extractJsonValue(message, "size");
-                    
-                    String result = readMemory(address, dataType, size);
-                    sendResponse(os, "value", result);
-                    
-                } else if ("search".equals(type)) {
-                    String value = extractJsonValue(message, "value");
-                    String dataType = extractJsonValue(message, "dataType");
-                    String startAddr = extractJsonValue(message, "startAddr");
-                    String endAddr = extractJsonValue(message, "endAddr");
-                    
-                    String result = searchMemory(value, dataType, startAddr, endAddr);
-                    sendResponse(os, "search_result", result);
-                    
-                } else if ("getBufferInfo".equals(type)) {
-                    long bufferSize = memoryBuffer.length;
-                    String info = "{\"size\":" + bufferSize + ",\"sizeMB\":" + (bufferSize / (1024 * 1024)) + 
-                                ",\"start\":\"0x00000000\",\"end\":\"0x" + Long.toHexString(bufferSize - 1) + "\"}";
-                    sendResponse(os, "buffer_info", info);
-                }
-            } catch (Exception e) {
-                System.err.println("Command error: " + e.getMessage());
-                e.printStackTrace();
-                sendResponse(os, "error", e.getMessage());
-            }
-        }
-
-        private boolean writeMemory(String address, String value, String dataType) {
-            try {
-                long addr = Long.parseLong(address.replace("0x", ""), 16);
-                
-                // Check bounds
-                if (addr < 0 || addr >= memoryBuffer.length) {
-                    System.err.println("Address out of bounds: " + address);
-                    return false;
-                }
-                
                 if ("byte".equals(dataType)) {
-                    byte val = (byte) Integer.parseInt(value);
-                    memoryBuffer[(int)addr] = val;
-                    return true;
-                } else if ("int".equals(dataType)) {
-                    int val = Integer.parseInt(value);
-                    if (addr + 4 > memoryBuffer.length) return false;
-                    ByteBuffer.wrap(memoryBuffer, (int)addr, 4).putInt(val);
-                    return true;
-                } else if ("long".equals(dataType)) {
-                    long val = Long.parseLong(value);
-                    if (addr + 8 > memoryBuffer.length) return false;
-                    ByteBuffer.wrap(memoryBuffer, (int)addr, 8).putLong(val);
-                    return true;
-                } else if ("float".equals(dataType)) {
-                    float val = Float.parseFloat(value);
-                    if (addr + 4 > memoryBuffer.length) return false;
-                    ByteBuffer.wrap(memoryBuffer, (int)addr, 4).putFloat(val);
-                    return true;
-                }
-                return false;
-            } catch (Exception e) {
-                System.err.println("Write error: " + e.getMessage());
-                return false;
-            }
-        }
-
-        private String readMemory(String address, String dataType, String size) {
-            try {
-                long addr = Long.parseLong(address.replace("0x", ""), 16);
-                int readSize = Integer.parseInt(size);
-                
-                if (addr < 0 || addr >= memoryBuffer.length) {
-                    return "error: address out of bounds";
-                }
-                
-                if ("byte".equals(dataType)) {
-                    byte[] data = new byte[readSize];
-                    int copySize = Math.min(readSize, (int)(memoryBuffer.length - addr));
-                    System.arraycopy(memoryBuffer, (int)addr, data, 0, copySize);
-                    StringBuilder hex = new StringBuilder();
-                    for (byte b : data) {
-                        hex.append(String.format("%02X ", b));
-                    }
-                    return hex.toString();
-                } else if ("int".equals(dataType)) {
-                    if (addr + 4 > memoryBuffer.length) return "error: out of bounds";
-                    int val = ByteBuffer.wrap(memoryBuffer, (int)addr, 4).getInt();
-                    return "0x" + Integer.toHexString(val);
-                } else if ("long".equals(dataType)) {
-                    if (addr + 8 > memoryBuffer.length) return "error: out of bounds";
-                    long val = ByteBuffer.wrap(memoryBuffer, (int)addr, 8).getLong();
-                    return "0x" + Long.toHexString(val);
-                } else if ("float".equals(dataType)) {
-                    if (addr + 4 > memoryBuffer.length) return "error: out of bounds";
-                    float val = ByteBuffer.wrap(memoryBuffer, (int)addr, 4).getFloat();
-                    return Float.toString(val);
-                }
-                return "0x00";
-            } catch (Exception e) {
-                return "error: " + e.getMessage();
-            }
-        }
-
-        private String searchMemory(String searchValue, String dataType, String startAddr, String endAddr) {
-            try {
-                long start = Long.parseLong(startAddr.replace("0x", ""), 16);
-                long end = Long.parseLong(endAddr.replace("0x", ""), 16);
-                
-                // Validate range
-                if (start < 0) start = 0;
-                if (end >= memoryBuffer.length) end = memoryBuffer.length - 1;
-                if (start > end) {
-                    return "{\"error\":\"Invalid range\",\"results\":[]}";
-                }
-                
-                List<String> results = new ArrayList<>();
-                long scanSize = end - start + 1;
-                
-                System.out.println("Scanning from 0x" + Long.toHexString(start) + 
-                                 " to 0x" + Long.toHexString(end) + 
-                                 " (" + (scanSize / 1024) + " KB)");
-                
-                if ("byte".equals(dataType)) {
-                    byte searchVal = (byte) Integer.parseInt(searchValue);
+                    byte target = (byte) Integer.parseInt(searchValue);
                     for (long i = start; i <= end; i++) {
-                        if (memoryBuffer[(int)i] == searchVal) {
-                            results.add("0x" + Long.toHexString(i));
-                            if (results.size() >= 100) break; // Limit results
+                        if (memoryBuffer[(int) i] == target) {
+                            results.add("0x" + padHex(Long.toHexString(i)));
+                            if (results.size() >= 500) break;
                         }
                     }
                 } else if ("int".equals(dataType)) {
-                    int searchVal = Integer.parseInt(searchValue);
+                    int target = Integer.parseInt(searchValue);
+                    // Iterasi i++ mendukung unaligned memory scan
                     for (long i = start; i <= end - 3; i++) {
-                        if (i + 4 > memoryBuffer.length) break;
-                        int val = ByteBuffer.wrap(memoryBuffer, (int)i, 4).getInt();
-                        if (val == searchVal) {
-                            results.add("0x" + Long.toHexString(i));
-                            if (results.size() >= 100) break;
+                        int val = ByteBuffer.wrap(memoryBuffer, (int) i, 4)
+                                            .order(ByteOrder.LITTLE_ENDIAN)
+                                            .getInt();
+                        if (val == target) {
+                            results.add("0x" + padHex(Long.toHexString(i)));
+                            if (results.size() >= 500) break;
                         }
                     }
                 } else if ("long".equals(dataType)) {
-                    long searchVal = Long.parseLong(searchValue);
+                    long target = Long.parseLong(searchValue);
                     for (long i = start; i <= end - 7; i++) {
-                        if (i + 8 > memoryBuffer.length) break;
-                        long val = ByteBuffer.wrap(memoryBuffer, (int)i, 8).getLong();
-                        if (val == searchVal) {
-                            results.add("0x" + Long.toHexString(i));
-                            if (results.size() >= 100) break;
+                        long val = ByteBuffer.wrap(memoryBuffer, (int) i, 8)
+                                             .order(ByteOrder.LITTLE_ENDIAN)
+                                             .getLong();
+                        if (val == target) {
+                            results.add("0x" + padHex(Long.toHexString(i)));
+                            if (results.size() >= 500) break;
                         }
                     }
                 } else if ("float".equals(dataType)) {
-                    float searchVal = Float.parseFloat(searchValue);
+                    float target = Float.parseFloat(searchValue);
                     for (long i = start; i <= end - 3; i++) {
-                        if (i + 4 > memoryBuffer.length) break;
-                        float val = ByteBuffer.wrap(memoryBuffer, (int)i, 4).getFloat();
-                        if (Math.abs(val - searchVal) < 0.0001f) {
-                            results.add("0x" + Long.toHexString(i));
-                            if (results.size() >= 100) break;
+                        float val = ByteBuffer.wrap(memoryBuffer, (int) i, 4)
+                                              .order(ByteOrder.LITTLE_ENDIAN)
+                                              .getFloat();
+                        // Toleransi presisi IEEE 754
+                        if (Math.abs(val - target) < 0.0001f) {
+                            results.add("0x" + padHex(Long.toHexString(i)));
+                            if (results.size() >= 500) break;
                         }
                     }
                 }
-                
-                StringBuilder resultJson = new StringBuilder("{\"scanRange\":{\"start\":\"0x" + 
-                    Long.toHexString(start) + "\",\"end\":\"0x" + Long.toHexString(end) + 
-                    "\"},\"found\":" + results.size() + ",\"results\":[");
-                
-                for (int i = 0; i < results.size(); i++) {
-                    resultJson.append("\"").append(results.get(i)).append("\"");
-                    if (i < results.size() - 1) resultJson.append(",");
-                }
-                resultJson.append("]}");
-                
-                return resultJson.toString();
             } catch (Exception e) {
-                System.err.println("Search error: " + e.getMessage());
-                return "{\"error\":\"" + e.getMessage() + "\",\"results\":[]}";
+                e.printStackTrace();
+            }
+
+            return results;
+        }
+
+        private List<String> filterMemory(String searchValue, String dataType, List<String> addresses) {
+            List<String> filtered = new ArrayList<>();
+            for (String addrStr : addresses) {
+                long addr = parseHex(addrStr, -1);
+                if (addr < 0 || addr >= MEMORY_SIZE) continue;
+
+                String currentVal = readMemoryValue((int) addr, dataType);
+                if ("float".equals(dataType)) {
+                    try {
+                        float v1 = Float.parseFloat(currentVal);
+                        float v2 = Float.parseFloat(searchValue);
+                        if (Math.abs(v1 - v2) < 0.0001f) filtered.add(addrStr);
+                    } catch (Exception ignored) {}
+                } else if (currentVal.equals(searchValue.trim())) {
+                    filtered.add(addrStr);
+                }
+            }
+            return filtered;
+        }
+
+        private void writeMemory(int addr, String valueStr, String dataType) {
+            try {
+                if ("byte".equals(dataType)) {
+                    memoryBuffer[addr] = (byte) Integer.parseInt(valueStr.trim());
+                } else if ("int".equals(dataType)) {
+                    ByteBuffer.wrap(memoryBuffer, addr, 4)
+                              .order(ByteOrder.LITTLE_ENDIAN)
+                              .putInt(Integer.parseInt(valueStr.trim()));
+                } else if ("long".equals(dataType)) {
+                    ByteBuffer.wrap(memoryBuffer, addr, 8)
+                              .order(ByteOrder.LITTLE_ENDIAN)
+                              .putLong(Long.parseLong(valueStr.trim()));
+                } else if ("float".equals(dataType)) {
+                    ByteBuffer.wrap(memoryBuffer, addr, 4)
+                              .order(ByteOrder.LITTLE_ENDIAN)
+                              .putFloat(Float.parseFloat(valueStr.trim()));
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
             }
         }
 
-        private void sendResponse(OutputStream os, String type, String value) throws IOException {
-            String response = "{\"type\":\"" + type + "\",\"data\":" + value + "}";
-            sendWsTextFrame(os, response);
+        private String readMemoryValue(int addr, String dataType) {
+            try {
+                if ("byte".equals(dataType)) {
+                    return String.valueOf(memoryBuffer[addr]);
+                } else if ("int".equals(dataType)) {
+                    return String.valueOf(ByteBuffer.wrap(memoryBuffer, addr, 4)
+                            .order(ByteOrder.LITTLE_ENDIAN).getInt());
+                } else if ("long".equals(dataType)) {
+                    return String.valueOf(ByteBuffer.wrap(memoryBuffer, addr, 8)
+                            .order(ByteOrder.LITTLE_ENDIAN).getLong());
+                } else if ("float".equals(dataType)) {
+                    return String.valueOf(ByteBuffer.wrap(memoryBuffer, addr, 4)
+                            .order(ByteOrder.LITTLE_ENDIAN).getFloat());
+                }
+            } catch (Exception e) {
+                return "0";
+            }
+            return "0";
         }
 
-        private String generateSecWebSocketAccept(String secWebSocketKey) throws Exception {
-            String input = secWebSocketKey + MAGIC_STRING;
-            MessageDigest md = MessageDigest.getInstance("SHA-1");
-            byte[] hash = md.digest(input.getBytes("UTF-8"));
-            return Base64.getEncoder().encodeToString(hash);
+        // --- UTILITY & JSON PARSER MANUAL ---
+
+        private String extractJsonValue(String json, String key) {
+            String pattern = "\"" + key + "\":\"";
+            int start = json.indexOf(pattern);
+            if (start == -1) {
+                // Coba angka atau non-string
+                pattern = "\"" + key + "\":";
+                start = json.indexOf(pattern);
+                if (start == -1) return "";
+                start += pattern.length();
+                int end = json.indexOf(",", start);
+                if (end == -1) end = json.indexOf("}", start);
+                return json.substring(start, end).replace("\"", "").trim();
+            }
+            start += pattern.length();
+            int end = json.indexOf("\"", start);
+            return json.substring(start, end);
+        }
+
+        private List<String> extractJsonArray(String json, String key) {
+            List<String> list = new ArrayList<>();
+            String pattern = "\"" + key + "\":[";
+            int start = json.indexOf(pattern);
+            if (start == -1) return list;
+            start += pattern.length();
+            int end = json.indexOf("]", start);
+            if (end == -1) return list;
+
+            String arrayContent = json.substring(start, end);
+            String[] items = arrayContent.split(",");
+            for (String item : items) {
+                String cleaned = item.replace("\"", "").trim();
+                if (!cleaned.isEmpty()) list.add(cleaned);
+            }
+            return list;
+        }
+
+        private String toJsonArray(List<String> list) {
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < list.size(); i++) {
+                sb.append("\"").append(list.get(i)).append("\"");
+                if (i < list.size() - 1) sb.append(",");
+            }
+            sb.append("]");
+            return sb.toString();
+        }
+
+        private long parseHex(String hex, long defaultVal) {
+            if (hex == null || hex.isEmpty()) return defaultVal;
+            try {
+                hex = hex.replace("0x", "").replace("0X", "").trim();
+                return Long.parseLong(hex, 16);
+            } catch (Exception e) {
+                return defaultVal;
+            }
         }
 
         private String padHex(String hex) {
-            hex = hex.toUpperCase();
-            while (hex.length() < 8) {
-                hex = "0" + hex;
-            }
-            return hex;
+            while (hex.length() < 8) hex = "0" + hex;
+            return hex.toUpperCase();
         }
 
-        private String extractJsonValue(String json, String key) {
-            String searchKey = "\"" + key + "\":\"";
-            int startIndex = json.indexOf(searchKey);
-            if (startIndex == -1) return "";
-            
-            startIndex += searchKey.length();
-            int endIndex = json.indexOf("\"", startIndex);
-            
-            if (endIndex == -1) return "";
-            return json.substring(startIndex, endIndex);
-        }
+        private void sendJsonResponse(OutputStream out, String type, String dataPayload) throws Exception {
+            String json = "{\"type\":\"" + type + "\",\"data\":" + 
+                    (dataPayload.startsWith("{") || dataPayload.startsWith("[") ? dataPayload : "\"" + dataPayload + "\"") + "}";
 
-        private void sendWsTextFrame(OutputStream os, String message) throws IOException {
-            byte[] rawData = message.getBytes("UTF-8");
-            int length = rawData.length;
+            byte[] payloadBytes = json.getBytes("UTF-8");
+            int length = payloadBytes.length;
 
-            // Frame format: FIN (1) + RSV (3) + OPCODE (4) = 0x81 for text frame
-            os.write(0x81);
-            
-            // Length encoding
+            out.write(0x81); // Text frame opcode
             if (length <= 125) {
-                os.write(length);
+                out.write(length);
             } else if (length <= 65535) {
-                os.write(126);
-                os.write((length >> 8) & 0xFF);
-                os.write(length & 0xFF);
-            } else {
-                os.write(127);
-                os.write((length >> 56) & 0xFF);
-                os.write((length >> 48) & 0xFF);
-                os.write((length >> 40) & 0xFF);
-                os.write((length >> 32) & 0xFF);
-                os.write((length >> 24) & 0xFF);
-                os.write((length >> 16) & 0xFF);
-                os.write((length >> 8) & 0xFF);
-                os.write(length & 0xFF);
+                out.write(126);
+                out.write((length >> 8) & 0xFF);
+                out.write(length & 0xFF);
             }
-            
-            // No masking needed for server->client messages
-            os.write(rawData);
-            os.flush();
+            out.write(payloadBytes);
+            out.flush();
+        }
+
+        private String readWebSocketFrame(java.io.InputStream in) throws Exception {
+            int b1 = in.read();
+            if (b1 == -1) return null;
+            int b2 = in.read();
+
+            boolean masked = (b2 & 0x80) != 0;
+            int payloadLength = b2 & 0x7F;
+
+            if (payloadLength == 126) {
+                payloadLength = (in.read() << 8) | in.read();
+            } else if (payloadLength == 127) {
+                return null; 
+            }
+
+            byte[] key = new byte[4];
+            if (masked) {
+                in.read(key, 0, 4);
+            }
+
+            byte[] payload = new byte[payloadLength];
+            int totalRead = 0;
+            while (totalRead < payloadLength) {
+                int read = in.read(payload, totalRead, payloadLength - totalRead);
+                if (read == -1) break;
+                totalRead += read;
+            }
+
+            if (masked) {
+                for (int i = 0; i < payloadLength; i++) {
+                    payload[i] = (byte) (payload[i] ^ key[i % 4]);
+                }
+            }
+
+            return new String(payload, "UTF-8");
         }
     }
 }
