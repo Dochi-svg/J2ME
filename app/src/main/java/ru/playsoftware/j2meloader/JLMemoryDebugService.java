@@ -1,3 +1,5 @@
+package ru.playsoftware.j2meloader;
+
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -10,21 +12,24 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 
-public class JLMemoryDebugService {
+public class JLMemoryDebugService implements Runnable {
 
-    private static final int PORT = 8080;
-    // Buffer memori tiruan/simulasi untuk runtime J2ME (16 MB)
     private static final int MEMORY_SIZE = 0x01000000; 
     private static final byte[] memoryBuffer = new byte[MEMORY_SIZE];
+    private int port;
 
-    public static void main(String[] args) {
-        // Inisialisasi dummy data untuk testing
+    public JLMemoryDebugService(int port) {
+        this.port = port;
+    }
+
+    @Override
+    public void run() {
         initDummyMemory();
 
         System.out.println("=== J2ME Memory Debugger Server (Little-Endian) ===");
-        System.out.println("Listening on ws://localhost:" + PORT);
+        System.out.println("Listening on ws://localhost:" + port);
 
-        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
+        try (ServerSocket serverSocket = new ServerSocket(port)) {
             while (true) {
                 Socket clientSocket = serverSocket.accept();
                 new Thread(new ClientHandler(clientSocket)).start();
@@ -169,7 +174,6 @@ public class JLMemoryDebugService {
                     }
                 } else if ("int".equals(dataType)) {
                     int target = Integer.parseInt(searchValue);
-                    // Iterasi i++ mendukung unaligned memory scan
                     for (long i = start; i <= end - 3; i++) {
                         int val = ByteBuffer.wrap(memoryBuffer, (int) i, 4)
                                             .order(ByteOrder.LITTLE_ENDIAN)
@@ -196,7 +200,6 @@ public class JLMemoryDebugService {
                         float val = ByteBuffer.wrap(memoryBuffer, (int) i, 4)
                                               .order(ByteOrder.LITTLE_ENDIAN)
                                               .getFloat();
-                        // Toleransi presisi IEEE 754
                         if (Math.abs(val - target) < 0.0001f) {
                             results.add("0x" + padHex(Long.toHexString(i)));
                             if (results.size() >= 500) break;
@@ -278,7 +281,6 @@ public class JLMemoryDebugService {
             String pattern = "\"" + key + "\":\"";
             int start = json.indexOf(pattern);
             if (start == -1) {
-                // Coba angka atau non-string
                 pattern = "\"" + key + "\":";
                 start = json.indexOf(pattern);
                 if (start == -1) return "";
@@ -342,7 +344,7 @@ public class JLMemoryDebugService {
             byte[] payloadBytes = json.getBytes("UTF-8");
             int length = payloadBytes.length;
 
-            out.write(0x81); // Text frame opcode
+            out.write(0x81);
             if (length <= 125) {
                 out.write(length);
             } else if (length <= 65535) {
