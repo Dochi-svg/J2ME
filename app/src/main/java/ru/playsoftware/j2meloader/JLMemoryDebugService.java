@@ -8,8 +8,10 @@ import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
@@ -18,9 +20,14 @@ public class JLMemoryDebugService implements Runnable {
     private int port;
     private boolean running = true;
     private ServerSocket serverSocket;
+    private static byte[] memoryBuffer = null;
 
     public JLMemoryDebugService(int port) {
         this.port = port;
+        // Initialize memory buffer (64 MB default)
+        if (memoryBuffer == null) {
+            memoryBuffer = new byte[64 * 1024 * 1024];
+        }
     }
 
     public void stopService() {
@@ -39,6 +46,7 @@ public class JLMemoryDebugService implements Runnable {
         try {
             serverSocket = new ServerSocket(port);
             System.out.println("Memory Debug Service started on port " + port);
+            System.out.println("Memory Buffer Size: " + (memoryBuffer.length / (1024 * 1024)) + " MB");
             while (running) {
                 Socket clientSocket = serverSocket.accept();
                 new Thread(new ClientHandler(clientSocket)).start();
@@ -122,7 +130,7 @@ public class JLMemoryDebugService implements Runnable {
         }
 
         private void handleWebSocketMessages(InputStream is, OutputStream os) throws Exception {
-            byte[] buffer = new byte[1024];
+            byte[] buffer = new byte[4096];
             long lastSendTime = 0;
 
             while (!socket.isClosed() && socket.isConnected()) {
@@ -232,9 +240,17 @@ public class JLMemoryDebugService implements Runnable {
                 } else if ("search".equals(type)) {
                     String value = extractJsonValue(message, "value");
                     String dataType = extractJsonValue(message, "dataType");
+                    String startAddr = extractJsonValue(message, "startAddr");
+                    String endAddr = extractJsonValue(message, "endAddr");
                     
-                    String result = searchMemory(value, dataType);
+                    String result = searchMemory(value, dataType, startAddr, endAddr);
                     sendResponse(os, "search_result", result);
+                    
+                } else if ("getBufferInfo".equals(type)) {
+                    long bufferSize = memoryBuffer.length;
+                    String info = "{\"size\":" + bufferSize + ",\"sizeMB\":" + (bufferSize / (1024 * 1024)) + 
+                                ",\"start\":\"0x00000000\",\"end\":\"0x" + Long.toHexString(bufferSize - 1) + "\"}";
+                    sendResponse(os, "buffer_info", info);
                 }
             } catch (Exception e) {
                 System.err.println("Command error: " + e.getMessage());
@@ -245,24 +261,32 @@ public class JLMemoryDebugService implements Runnable {
 
         private boolean writeMemory(String address, String value, String dataType) {
             try {
-                // Get all objects in heap
                 long addr = Long.parseLong(address.replace("0x", ""), 16);
+                
+                // Check bounds
+                if (addr < 0 || addr >= memoryBuffer.length) {
+                    System.err.println("Address out of bounds: " + address);
+                    return false;
+                }
                 
                 if ("byte".equals(dataType)) {
                     byte val = (byte) Integer.parseInt(value);
-                    writeByteToMemory(val);
+                    memoryBuffer[(int)addr] = val;
                     return true;
                 } else if ("int".equals(dataType)) {
                     int val = Integer.parseInt(value);
-                    writeIntToMemory(val);
+                    if (addr + 4 > memoryBuffer.length) return false;
+                    ByteBuffer.wrap(memoryBuffer, (int)addr, 4).putInt(val);
                     return true;
                 } else if ("long".equals(dataType)) {
                     long val = Long.parseLong(value);
-                    writeLongToMemory(val);
+                    if (addr + 8 > memoryBuffer.length) return false;
+                    ByteBuffer.wrap(memoryBuffer, (int)addr, 8).putLong(val);
                     return true;
                 } else if ("float".equals(dataType)) {
                     float val = Float.parseFloat(value);
-                    writeFloatToMemory(val);
+                    if (addr + 4 > memoryBuffer.length) return false;
+                    ByteBuffer.wrap(memoryBuffer, (int)addr, 4).putFloat(val);
                     return true;
                 }
                 return false;
@@ -274,21 +298,33 @@ public class JLMemoryDebugService implements Runnable {
 
         private String readMemory(String address, String dataType, String size) {
             try {
+                long addr = Long.parseLong(address.replace("0x", ""), 16);
+                int readSize = Integer.parseInt(size);
+                
+                if (addr < 0 || addr >= memoryBuffer.length) {
+                    return "error: address out of bounds";
+                }
+                
                 if ("byte".equals(dataType)) {
-                    byte[] data = readBytesFromMemory(Integer.parseInt(size));
+                    byte[] data = new byte[readSize];
+                    int copySize = Math.min(readSize, (int)(memoryBuffer.length - addr));
+                    System.arraycopy(memoryBuffer, (int)addr, data, 0, copySize);
                     StringBuilder hex = new StringBuilder();
                     for (byte b : data) {
                         hex.append(String.format("%02X ", b));
                     }
                     return hex.toString();
                 } else if ("int".equals(dataType)) {
-                    int val = readIntFromMemory();
+                    if (addr + 4 > memoryBuffer.length) return "error: out of bounds";
+                    int val = ByteBuffer.wrap(memoryBuffer, (int)addr, 4).getInt();
                     return "0x" + Integer.toHexString(val);
                 } else if ("long".equals(dataType)) {
-                    long val = readLongFromMemory();
+                    if (addr + 8 > memoryBuffer.length) return "error: out of bounds";
+                    long val = ByteBuffer.wrap(memoryBuffer, (int)addr, 8).getLong();
                     return "0x" + Long.toHexString(val);
                 } else if ("float".equals(dataType)) {
-                    float val = readFloatFromMemory();
+                    if (addr + 4 > memoryBuffer.length) return "error: out of bounds";
+                    float val = ByteBuffer.wrap(memoryBuffer, (int)addr, 4).getFloat();
                     return Float.toString(val);
                 }
                 return "0x00";
@@ -297,91 +333,84 @@ public class JLMemoryDebugService implements Runnable {
             }
         }
 
-        private String searchMemory(String value, String dataType) {
+        private String searchMemory(String searchValue, String dataType, String startAddr, String endAddr) {
             try {
-                StringBuilder results = new StringBuilder("[");
-                int count = 0;
+                long start = Long.parseLong(startAddr.replace("0x", ""), 16);
+                long end = Long.parseLong(endAddr.replace("0x", ""), 16);
                 
-                // Search in heap (simplified)
-                Runtime runtime = Runtime.getRuntime();
-                if ("int".equals(dataType)) {
-                    int searchVal = Integer.parseInt(value);
-                    // This is a simplified search - real implementation would need memory scanning
-                    results.append("\"0x").append(Integer.toHexString(searchVal)).append("\"");
+                // Validate range
+                if (start < 0) start = 0;
+                if (end >= memoryBuffer.length) end = memoryBuffer.length - 1;
+                if (start > end) {
+                    return "{\"error\":\"Invalid range\",\"results\":[]}";
                 }
                 
-                results.append("]");
-                return results.toString();
+                List<String> results = new ArrayList<>();
+                long scanSize = end - start + 1;
+                
+                System.out.println("Scanning from 0x" + Long.toHexString(start) + 
+                                 " to 0x" + Long.toHexString(end) + 
+                                 " (" + (scanSize / 1024) + " KB)");
+                
+                if ("byte".equals(dataType)) {
+                    byte searchVal = (byte) Integer.parseInt(searchValue);
+                    for (long i = start; i <= end; i++) {
+                        if (memoryBuffer[(int)i] == searchVal) {
+                            results.add("0x" + Long.toHexString(i));
+                            if (results.size() >= 100) break; // Limit results
+                        }
+                    }
+                } else if ("int".equals(dataType)) {
+                    int searchVal = Integer.parseInt(searchValue);
+                    for (long i = start; i <= end - 3; i++) {
+                        if (i + 4 > memoryBuffer.length) break;
+                        int val = ByteBuffer.wrap(memoryBuffer, (int)i, 4).getInt();
+                        if (val == searchVal) {
+                            results.add("0x" + Long.toHexString(i));
+                            if (results.size() >= 100) break;
+                        }
+                    }
+                } else if ("long".equals(dataType)) {
+                    long searchVal = Long.parseLong(searchValue);
+                    for (long i = start; i <= end - 7; i++) {
+                        if (i + 8 > memoryBuffer.length) break;
+                        long val = ByteBuffer.wrap(memoryBuffer, (int)i, 8).getLong();
+                        if (val == searchVal) {
+                            results.add("0x" + Long.toHexString(i));
+                            if (results.size() >= 100) break;
+                        }
+                    }
+                } else if ("float".equals(dataType)) {
+                    float searchVal = Float.parseFloat(searchValue);
+                    for (long i = start; i <= end - 3; i++) {
+                        if (i + 4 > memoryBuffer.length) break;
+                        float val = ByteBuffer.wrap(memoryBuffer, (int)i, 4).getFloat();
+                        if (Math.abs(val - searchVal) < 0.0001f) {
+                            results.add("0x" + Long.toHexString(i));
+                            if (results.size() >= 100) break;
+                        }
+                    }
+                }
+                
+                StringBuilder resultJson = new StringBuilder("{\"scanRange\":{\"start\":\"0x" + 
+                    Long.toHexString(start) + "\",\"end\":\"0x" + Long.toHexString(end) + 
+                    "\"},\"found\":" + results.size() + ",\"results\":[");
+                
+                for (int i = 0; i < results.size(); i++) {
+                    resultJson.append("\"").append(results.get(i)).append("\"");
+                    if (i < results.size() - 1) resultJson.append(",");
+                }
+                resultJson.append("]}");
+                
+                return resultJson.toString();
             } catch (Exception e) {
-                return "[]";
+                System.err.println("Search error: " + e.getMessage());
+                return "{\"error\":\"" + e.getMessage() + "\",\"results\":[]}";
             }
         }
-
-        // Memory write operations
-        private void writeByteToMemory(byte value) {
-            // Store in a static array for testing
-            if (memoryBuffer == null) {
-                memoryBuffer = new byte[1024 * 1024]; // 1MB buffer
-            }
-            memoryBuffer[0] = value;
-        }
-
-        private void writeIntToMemory(int value) {
-            if (memoryBuffer == null) {
-                memoryBuffer = new byte[1024 * 1024];
-            }
-            ByteBuffer.wrap(memoryBuffer, 0, 4).putInt(value);
-        }
-
-        private void writeLongToMemory(long value) {
-            if (memoryBuffer == null) {
-                memoryBuffer = new byte[1024 * 1024];
-            }
-            ByteBuffer.wrap(memoryBuffer, 0, 8).putLong(value);
-        }
-
-        private void writeFloatToMemory(float value) {
-            if (memoryBuffer == null) {
-                memoryBuffer = new byte[1024 * 1024];
-            }
-            ByteBuffer.wrap(memoryBuffer, 0, 4).putFloat(value);
-        }
-
-        // Memory read operations
-        private byte[] readBytesFromMemory(int size) {
-            if (memoryBuffer == null) {
-                memoryBuffer = new byte[1024 * 1024];
-            }
-            byte[] result = new byte[size];
-            System.arraycopy(memoryBuffer, 0, result, 0, Math.min(size, memoryBuffer.length));
-            return result;
-        }
-
-        private int readIntFromMemory() {
-            if (memoryBuffer == null) {
-                memoryBuffer = new byte[1024 * 1024];
-            }
-            return ByteBuffer.wrap(memoryBuffer, 0, 4).getInt();
-        }
-
-        private long readLongFromMemory() {
-            if (memoryBuffer == null) {
-                memoryBuffer = new byte[1024 * 1024];
-            }
-            return ByteBuffer.wrap(memoryBuffer, 0, 8).getLong();
-        }
-
-        private float readFloatFromMemory() {
-            if (memoryBuffer == null) {
-                memoryBuffer = new byte[1024 * 1024];
-            }
-            return ByteBuffer.wrap(memoryBuffer, 0, 4).getFloat();
-        }
-
-        private static byte[] memoryBuffer = null;
 
         private void sendResponse(OutputStream os, String type, String value) throws IOException {
-            String response = "{\"type\":\"" + type + "\",\"data\":\"" + value.replace("\"", "\\\"") + "\"}";
+            String response = "{\"type\":\"" + type + "\",\"data\":" + value + "}";
             sendWsTextFrame(os, response);
         }
 
@@ -408,6 +437,7 @@ public class JLMemoryDebugService implements Runnable {
             startIndex += searchKey.length();
             int endIndex = json.indexOf("\"", startIndex);
             
+            if (endIndex == -1) return "";
             return json.substring(startIndex, endIndex);
         }
 
