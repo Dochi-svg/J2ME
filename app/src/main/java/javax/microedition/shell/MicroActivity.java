@@ -47,6 +47,8 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Objects;
 
@@ -261,7 +263,7 @@ public class MicroActivity extends AppCompatActivity {
 
 		byte[] gameMemoryBuffer = getGameMemoryBuffer();
 		JLMemoryDebugService debugService = JLMemoryDebugService.getInstance();
-		if (debugService != null) {
+		if (debugService != null && gameMemoryBuffer != null) {
 			debugService.setVMMemory(gameMemoryBuffer);
 		}
 	}
@@ -275,8 +277,9 @@ public class MicroActivity extends AppCompatActivity {
 				return (byte[]) ramObj;
 			}
 		} catch (Throwable ignored) {
+			return null;
 		}
-		return new byte[16 * 1024 * 1024];
+		return null;
 	}
 
 	private void showMidletDialog(String[] names, final String[] classes) {
@@ -537,61 +540,198 @@ public class MicroActivity extends AppCompatActivity {
 	 * Pop-Up Dialog Live Injector & Reader langsung ke RAM MidletThread
 	 */
 	private void showMemoryHackDialog() {
-		byte[] ram = getGameMemoryBuffer();
-		if (ram == null) {
-			Toast.makeText(this, "Gagal membaca RAM Game!", Toast.LENGTH_SHORT).show();
+		/*
+		 * Real scanner untuk RAM virtual MIDletThread:
+		 * First Scan -> menyimpan semua alamat yang cocok.
+		 * Next Scan  -> membaca RAM LIVE lagi dan menyaring hasil lama.
+		 * Inject     -> menulis langsung ke buffer RAM yang dipakai MIDlet.
+		 */
+		final byte[] ram = getGameMemoryBuffer();
+		if (ram == null || ram.length < 4) {
+			Toast.makeText(this, "RAM Game tidak tersedia!", Toast.LENGTH_LONG).show();
 			return;
 		}
 
-		LinearLayout layout = new LinearLayout(this);
-		layout.setOrientation(LinearLayout.VERTICAL);
-		layout.setPadding(50, 30, 50, 30);
+		final List<Integer> results = new ArrayList<>();
+		final LinearLayout root = new LinearLayout(this);
+		root.setOrientation(LinearLayout.VERTICAL);
+		root.setPadding(28, 18, 28, 8);
 
-		final EditText inputAddress = new EditText(this);
-		inputAddress.setHint("Alamat Hex (Contoh: 0x0012FA atau 12FA)");
-		layout.addView(inputAddress);
+		final EditText valueInput = new EditText(this);
+		valueInput.setHint("Nilai Integer");
+		valueInput.setSingleLine(true);
+		valueInput.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
+		root.addView(valueInput, new LinearLayout.LayoutParams(
+				ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-		final EditText inputValue = new EditText(this);
-		inputValue.setHint("Nilai Baru (Integer)");
-		inputValue.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
-		layout.addView(inputValue);
+		final EditText addressInput = new EditText(this);
+		addressInput.setHint("Alamat Hex untuk Inject, contoh 0x0012FA");
+		addressInput.setSingleLine(true);
+		root.addView(addressInput, new LinearLayout.LayoutParams(
+				ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-		new AlertDialog.Builder(this)
-				.setTitle("Live Memory Injector")
-				.setMessage("RAM Active: " + (ram.length / 1024 / 1024) + " MB")
-				.setView(layout)
-				.setPositiveButton("Inject", (dialog, which) -> {
-					try {
-						String addrStr = inputAddress.getText().toString().replace("0x", "").trim();
-						int addr = Integer.parseInt(addrStr, 16);
-						int newVal = Integer.parseInt(inputValue.getText().toString().trim());
+		final EditText injectValueInput = new EditText(this);
+		injectValueInput.setHint("Nilai baru untuk Inject");
+		injectValueInput.setSingleLine(true);
+		injectValueInput.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
+		root.addView(injectValueInput, new LinearLayout.LayoutParams(
+				ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-						if (addr >= 0 && addr <= ram.length - 4) {
-							ByteBuffer.wrap(ram, addr, 4).order(ByteOrder.LITTLE_ENDIAN).putInt(newVal);
-							Toast.makeText(this, "Berhasil Inject ke 0x" + Integer.toHexString(addr).toUpperCase(), Toast.LENGTH_SHORT).show();
-						} else {
-							Toast.makeText(this, "Alamat memori di luar jangkauan!", Toast.LENGTH_SHORT).show();
-						}
-					} catch (Exception e) {
-						Toast.makeText(this, "Error: Format Alamat atau Nilai Salah!", Toast.LENGTH_SHORT).show();
-					}
-				})
-				.setNeutralButton("Baca Nilai", (dialog, which) -> {
-					try {
-						String addrStr = inputAddress.getText().toString().replace("0x", "").trim();
-						int addr = Integer.parseInt(addrStr, 16);
-						if (addr >= 0 && addr <= ram.length - 4) {
-							int val = ByteBuffer.wrap(ram, addr, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
-							Toast.makeText(this, "Nilai di 0x" + Integer.toHexString(addr).toUpperCase() + " = " + val, Toast.LENGTH_LONG).show();
-						} else {
-							Toast.makeText(this, "Alamat memori di luar jangkauan!", Toast.LENGTH_SHORT).show();
-						}
-					} catch (Exception e) {
-						Toast.makeText(this, "Error: Format Alamat Salah!", Toast.LENGTH_SHORT).show();
-					}
-				})
-				.setNegativeButton("Batal", null)
-				.show();
+		final android.widget.TextView status = new android.widget.TextView(this);
+		status.setPadding(0, 14, 0, 8);
+		status.setText("First Scan belum dilakukan.");
+		root.addView(status);
+
+		final android.widget.ListView listView = new android.widget.ListView(this);
+		final ArrayList<String> rows = new ArrayList<>();
+		final android.widget.ArrayAdapter<String> adapter =
+				new android.widget.ArrayAdapter<>(this,
+						android.R.layout.simple_list_item_1, rows);
+		listView.setAdapter(adapter);
+
+		final android.widget.Button firstButton = new android.widget.Button(this);
+		firstButton.setText("FIRST SCAN");
+		final android.widget.Button nextButton = new android.widget.Button(this);
+		nextButton.setText("NEXT SCAN");
+		final android.widget.Button injectButton = new android.widget.Button(this);
+		injectButton.setText("INJECT");
+		final android.widget.Button injectAllButton = new android.widget.Button(this);
+		injectAllButton.setText("INJECT ALL");
+
+		LinearLayout buttons = new LinearLayout(this);
+		buttons.setOrientation(LinearLayout.HORIZONTAL);
+		buttons.addView(firstButton, new LinearLayout.LayoutParams(0,
+				ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+		buttons.addView(nextButton, new LinearLayout.LayoutParams(0,
+				ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+		root.addView(buttons);
+
+		LinearLayout injectButtons = new LinearLayout(this);
+		injectButtons.setOrientation(LinearLayout.HORIZONTAL);
+		injectButtons.addView(injectButton, new LinearLayout.LayoutParams(0,
+				ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+		injectButtons.addView(injectAllButton, new LinearLayout.LayoutParams(0,
+				ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+		root.addView(injectButtons);
+
+		android.widget.ScrollView resultScroll = new android.widget.ScrollView(this);
+		resultScroll.addView(listView, new ViewGroup.LayoutParams(
+				ViewGroup.LayoutParams.MATCH_PARENT, 520));
+		root.addView(resultScroll, new LinearLayout.LayoutParams(
+				ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
+		final AlertDialog dialog = new AlertDialog.Builder(this)
+				.setTitle("Memory Cheat Engine")
+				.setMessage("RAM aktif: " + (ram.length / 1024 / 1024) + " MB")
+				.setView(root)
+				.setNegativeButton("Tutup", null)
+				.create();
+
+		Runnable refreshList = () -> {
+			rows.clear();
+			int displayCount = Math.min(results.size(), 5000);
+			for (int i = 0; i < displayCount; i++) {
+				int address = results.get(i);
+				int currentValue = MemoryEngine.readInt(MemoryEngine.getLiveRam(), address);
+				rows.add(String.format("0x%08X  =  %d", address, currentValue));
+			}
+			if (results.size() > displayCount) {
+				rows.add("... " + (results.size() - displayCount) + " hasil lainnya");
+			}
+			adapter.notifyDataSetChanged();
+			status.setText("Hasil: " + results.size());
+		};
+
+		firstButton.setOnClickListener(v -> {
+			try {
+				int target = Integer.parseInt(valueInput.getText().toString().trim());
+				byte[] liveRam = MemoryEngine.getLiveRam();
+				results.clear();
+				results.addAll(MemoryEngine.firstScanInt(liveRam, target));
+				refreshList.run();
+				Toast.makeText(this, "First Scan selesai: " + results.size() + " alamat",
+						Toast.LENGTH_SHORT).show();
+			} catch (NumberFormatException e) {
+				Toast.makeText(this, "Masukkan nilai Integer yang valid!",
+						Toast.LENGTH_SHORT).show();
+			}
+		});
+
+		nextButton.setOnClickListener(v -> {
+			if (results.isEmpty()) {
+				Toast.makeText(this, "Lakukan First Scan terlebih dahulu!",
+						Toast.LENGTH_SHORT).show();
+				return;
+			}
+			try {
+				int target = Integer.parseInt(valueInput.getText().toString().trim());
+				byte[] liveRam = MemoryEngine.getLiveRam();
+				List<Integer> filtered =
+						MemoryEngine.nextScanInt(liveRam, results, target);
+				results.clear();
+				results.addAll(filtered);
+				refreshList.run();
+				Toast.makeText(this, "Next Scan selesai: " + results.size() + " alamat",
+						Toast.LENGTH_SHORT).show();
+			} catch (NumberFormatException e) {
+				Toast.makeText(this, "Masukkan nilai Integer yang valid!",
+						Toast.LENGTH_SHORT).show();
+			}
+		});
+
+		listView.setOnItemClickListener((parent, view1, position, id) -> {
+			if (position >= results.size()) return;
+			int address = results.get(position);
+			addressInput.setText(String.format("0x%08X", address));
+			byte[] liveRam = MemoryEngine.getLiveRam();
+			injectValueInput.setText(String.valueOf(MemoryEngine.readInt(liveRam, address)));
+		});
+
+		injectButton.setOnClickListener(v -> {
+			try {
+				String text = addressInput.getText().toString()
+						.trim().replace("0x", "").replace("0X", "");
+				int address = (int) Long.parseLong(text, 16);
+				int newValue = Integer.parseInt(injectValueInput.getText().toString().trim());
+
+				byte[] liveRam = MemoryEngine.getLiveRam();
+				if (MemoryEngine.writeInt(liveRam, address, newValue)) {
+					Toast.makeText(this,
+							String.format("Injected 0x%08X = %d", address, newValue),
+							Toast.LENGTH_SHORT).show();
+					refreshList.run();
+				} else {
+					Toast.makeText(this, "Alamat di luar RAM!", Toast.LENGTH_SHORT).show();
+				}
+			} catch (NumberFormatException e) {
+				Toast.makeText(this, "Alamat atau nilai Inject tidak valid!",
+						Toast.LENGTH_SHORT).show();
+			}
+		});
+
+		injectAllButton.setOnClickListener(v -> {
+			if (results.isEmpty()) {
+				Toast.makeText(this, "Tidak ada hasil untuk di-inject!",
+						Toast.LENGTH_SHORT).show();
+				return;
+			}
+			try {
+				int newValue = Integer.parseInt(injectValueInput.getText().toString().trim());
+				byte[] liveRam = MemoryEngine.getLiveRam();
+				int count = 0;
+				for (Integer address : results) {
+					if (MemoryEngine.writeInt(liveRam, address, newValue)) count++;
+				}
+				refreshList.run();
+				Toast.makeText(this, "Inject " + count + " alamat selesai.",
+						Toast.LENGTH_SHORT).show();
+			} catch (NumberFormatException e) {
+				Toast.makeText(this, "Masukkan nilai baru yang valid!",
+						Toast.LENGTH_SHORT).show();
+			}
+		});
+
+		dialog.show();
 	}
 
 	private void handleVkOptions(int id) {
