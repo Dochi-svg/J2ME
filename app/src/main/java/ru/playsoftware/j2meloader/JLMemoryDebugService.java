@@ -14,7 +14,7 @@ import java.util.List;
 
 public class JLMemoryDebugService implements Runnable {
 
-    private static final int MEMORY_SIZE = 0x01000000; 
+    private static final int MEMORY_SIZE = 0x03FFFFFF; 
     private static final byte[] memoryBuffer = new byte[MEMORY_SIZE];
     private int port;
 
